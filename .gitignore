@@ -1,0 +1,15 @@
+/target/
+/.cache/
+/.vscode/
+/.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+*.log
+*.tmp
+*.bak
+*.orig
+*.rej
+

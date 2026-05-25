@@ -1,0 +1,29 @@
+[package]
+name = "meso-app"
+description = "GTK4 desktop UI for Meso weather application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "meso"
+path = "src/main.rs"
+
+[dependencies]
+meso-data = { path = "../meso-data" }
+meso-render = { path = "../meso-render" }
+gtk4.workspace = true
+libadwaita.workspace = true
+glib.workspace = true
+gdk4.workspace = true
+gdk-pixbuf.workspace = true
+tokio.workspace = true
+serde.workspace = true
+toml.workspace = true
+directories.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+image.workspace = true
+reqwest = { workspace = true, features = ["json", "gzip", "deflate"] }

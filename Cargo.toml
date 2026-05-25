@@ -1,0 +1,70 @@
+[workspace]
+members = [
+    "crates/meso-data",
+    "crates/meso-render",
+    "crates/meso-app",
+    "crates/meso-updraft",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["wX-RS Contributors"]
+license = "GPL-3.0-or-later"
+
+[workspace.dependencies]
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# HTTP
+reqwest = { version = "0.12", features = ["stream", "gzip", "deflate", "json"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Binary parsing
+byteorder = "1"
+
+# Regex (for HTML directory parsing)
+regex = "1"
+
+# Compression
+bzip2 = "0.4"
+flate2 = "1"
+
+# Image decoding
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
+
+# Config dirs
+directories = "5"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Geo/math
+geo = "0.28"
+
+# GTK4
+gtk4 = { version = "0.9", features = ["v4_12"] }
+libadwaita = { version = "0.7", features = ["v1_5"] }
+glib = "0.20"
+gdk4 = "0.9"
+gdk-pixbuf = "0.20"
+
+# OpenGL / GPU
+wgpu = { version = "22", features = ["wgsl"] }
+bytemuck = { version = "1", features = ["derive"] }
+
+# Cairo (CPU fallback)
+cairo-rs = "0.20"

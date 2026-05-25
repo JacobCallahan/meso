@@ -1,0 +1,26 @@
+# meso-updraft systemd user service template
+#
+# Install:
+#   1. Copy (or symlink) this file to ~/.config/systemd/user/meso-updraft.service
+#   2. Copy the meso-updraft binary to ~/.local/bin/ (or any directory in your PATH)
+#   3. systemctl --user daemon-reload
+#   4. systemctl --user enable --now meso-updraft
+#
+# The daemon reads ~/.config/Meso/config.toml and ~/.config/Meso/subscriptions.toml
+# on each wake cycle, so no restart is needed when you change settings or subscriptions.
+
+[Unit]
+Description=Meso background caching daemon
+Documentation=https://github.com/your-org/meso
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/meso-updraft
+Restart=on-failure
+RestartSec=30
+Environment=RUST_LOG=meso_updraft=info
+
+[Install]
+WantedBy=default.target

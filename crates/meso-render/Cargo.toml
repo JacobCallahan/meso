@@ -1,0 +1,18 @@
+[package]
+name = "meso-render"
+description = "Radar rendering engine (wgpu + Cairo CPU fallback) for Meso"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+meso-data = { path = "../meso-data" }
+wgpu.workspace = true
+cairo-rs.workspace = true
+image.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+byteorder.workspace = true
+tokio.workspace = true
+bytemuck.workspace = true
