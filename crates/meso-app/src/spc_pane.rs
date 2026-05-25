@@ -10,8 +10,8 @@
 use gdk_pixbuf::Pixbuf;
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GBox, Button, ComboBoxText, Label, ListBox, ListBoxRow, Orientation, Paned, PolicyType,
-    ScrolledWindow, Separator, ToggleButton,
+    Box as GBox, Button, DropDown, Label, ListBox, ListBoxRow, Orientation, Paned, PolicyType,
+    ScrolledWindow, Separator, StringList, ToggleButton,
 };
 
 use std::cell::RefCell;
@@ -55,11 +55,11 @@ pub fn build_spc_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
 
     // Mesoanalysis controls
     let meso_refresh_btn = Button::with_label("⟳");
-    let meso_combo = ComboBoxText::new();
-    for prod in MESO_PRODUCTS {
-        meso_combo.append(Some(prod.id), prod.label);
-    }
-    meso_combo.set_active_id(Some(MESO_PRODUCTS[0].id));
+    let meso_model = StringList::new(
+        &MESO_PRODUCTS.iter().map(|p| p.label).collect::<Vec<_>>(),
+    );
+    let meso_combo = DropDown::new(Some(meso_model), gtk4::Expression::NONE);
+    meso_combo.set_selected(0);
     meso_combo.set_hexpand(false);
 
     // Initially hide mesoanalysis controls
@@ -96,7 +96,7 @@ pub fn build_spc_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     } else {
         let p_clone = paned.clone();
         paned.connect_realize(move |_| {
-            let w = p_clone.allocated_width();
+            let w = p_clone.width();
             if w > 10 {
                 p_clone.set_position((w as f64 * 0.72) as i32);
             }
@@ -304,9 +304,10 @@ pub fn build_spc_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         let da_c = drawing_area.clone();
         let st_c = status.clone();
         let combo_c = meso_combo.clone();
-        meso_combo.connect_changed(move |combo| {
-            if let Some(id) = combo.active_id() {
-                state_c.borrow_mut().meso_product = id.to_string();
+        meso_combo.connect_selected_notify(move |combo| {
+            let idx = combo.selected() as usize;
+            if let Some(prod) = MESO_PRODUCTS.get(idx) {
+                state_c.borrow_mut().meso_product = prod.id.to_string();
                 load_meso(
                     Rc::clone(&state_c),
                     da_c.clone(),
@@ -394,7 +395,7 @@ fn load_meso(
     state: Rc<RefCell<SpcState>>,
     da: gtk4::DrawingArea,
     status: Label,
-    combo: ComboBoxText,
+    combo: DropDown,
 ) {
     let product_id = state.borrow().meso_product.clone();
     let product_label = MESO_PRODUCTS

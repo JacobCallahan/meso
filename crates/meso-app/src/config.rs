@@ -309,6 +309,7 @@ impl Config {
     }
 
     /// Return the currently active named location, if any.
+    #[allow(dead_code)]
     pub fn active_loc(&self) -> Option<&NamedLocation> {
         if self.active_location.is_empty() {
             return None;

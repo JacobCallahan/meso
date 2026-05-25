@@ -207,7 +207,7 @@ pub fn build_observations_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
                             if ct == LOADING_SENTINEL {
                                 return false;
                             }
-                            let mut ci = c;
+                            let ci = c;
                             loop {
                                 let cl: String = model.get::<String>(&ci, COL_LABEL as i32);
                                 if cl.to_lowercase().contains(text) {
@@ -274,7 +274,7 @@ pub fn build_observations_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
     {
         let paned_c = paned.clone();
         paned.connect_realize(move |p| {
-            let w = p.allocated_width();
+            let w = p.width();
             if w > 0 {
                 paned_c.set_position((w as f64 * 0.38) as i32);
             }

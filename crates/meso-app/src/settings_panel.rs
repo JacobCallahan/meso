@@ -14,8 +14,8 @@
 
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GBox, Button, CheckButton, ComboBoxText, Label, Orientation, Separator, SpinButton,
-    Window,
+    Box as GBox, Button, CheckButton, DropDown, Label, Orientation, Separator, SpinButton,
+    StringList, Window,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -45,16 +45,18 @@ pub fn show_settings_panel(parent: &impl IsA<Window>, shared_config: Rc<RefCell<
 
     // Ref palette
     radar_grid.attach(&row_label("Reflectivity palette"), 0, 0, 1, 1);
-    let ref_pal = ComboBoxText::new();
-    for name in REF_PALETTE_NAMES {
-        ref_pal.append(Some(name), name);
+    let ref_pal = DropDown::from_strings(REF_PALETTE_NAMES);
+    if let Some(pos) = REF_PALETTE_NAMES
+        .iter()
+        .position(|&n| n == shared_config.borrow().radar_palette_ref)
+    {
+        ref_pal.set_selected(pos as u32);
     }
-    ref_pal.set_active_id(Some(&shared_config.borrow().radar_palette_ref));
     {
         let cfg = Rc::clone(&shared_config);
-        ref_pal.connect_changed(move |combo| {
-            if let Some(id) = combo.active_id() {
-                cfg.borrow_mut().radar_palette_ref = id.to_string();
+        ref_pal.connect_selected_notify(move |combo| {
+            if let Some(name) = REF_PALETTE_NAMES.get(combo.selected() as usize) {
+                cfg.borrow_mut().radar_palette_ref = name.to_string();
             }
         });
     }
@@ -62,16 +64,18 @@ pub fn show_settings_panel(parent: &impl IsA<Window>, shared_config: Rc<RefCell<
 
     // Vel palette
     radar_grid.attach(&row_label("Velocity palette"), 0, 1, 1, 1);
-    let vel_pal = ComboBoxText::new();
-    for name in VEL_PALETTE_NAMES {
-        vel_pal.append(Some(name), name);
+    let vel_pal = DropDown::from_strings(VEL_PALETTE_NAMES);
+    if let Some(pos) = VEL_PALETTE_NAMES
+        .iter()
+        .position(|&n| n == shared_config.borrow().radar_palette_vel)
+    {
+        vel_pal.set_selected(pos as u32);
     }
-    vel_pal.set_active_id(Some(&shared_config.borrow().radar_palette_vel));
     {
         let cfg = Rc::clone(&shared_config);
-        vel_pal.connect_changed(move |combo| {
-            if let Some(id) = combo.active_id() {
-                cfg.borrow_mut().radar_palette_vel = id.to_string();
+        vel_pal.connect_selected_notify(move |combo| {
+            if let Some(name) = VEL_PALETTE_NAMES.get(combo.selected() as usize) {
+                cfg.borrow_mut().radar_palette_vel = name.to_string();
             }
         });
     }
@@ -103,16 +107,26 @@ pub fn show_settings_panel(parent: &impl IsA<Window>, shared_config: Rc<RefCell<
 
     // Default sector
     sat_grid.attach(&row_label("Default sector"), 0, 0, 1, 1);
-    let sector_combo = ComboBoxText::new();
-    for s in SECTORS {
-        sector_combo.append(Some(s.code), &format!("{} ({})", s.code, s.name));
+    let sector_displays: Vec<String> = SECTORS
+        .iter()
+        .map(|s| format!("{} ({})", s.code, s.name))
+        .collect();
+    let sector_ids: Vec<&str> = SECTORS.iter().map(|s| s.code).collect();
+    let sector_model =
+        StringList::new(&sector_displays.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let sector_combo = DropDown::new(Some(sector_model), gtk4::Expression::NONE);
+    if let Some(pos) = sector_ids
+        .iter()
+        .position(|&c| c == shared_config.borrow().goes_sector)
+    {
+        sector_combo.set_selected(pos as u32);
     }
-    sector_combo.set_active_id(Some(&shared_config.borrow().goes_sector));
     {
         let cfg = Rc::clone(&shared_config);
-        sector_combo.connect_changed(move |combo| {
-            if let Some(id) = combo.active_id() {
-                cfg.borrow_mut().goes_sector = id.to_string();
+        let sector_ids_c = sector_ids.clone();
+        sector_combo.connect_selected_notify(move |combo| {
+            if let Some(&code) = sector_ids_c.get(combo.selected() as usize) {
+                cfg.borrow_mut().goes_sector = code.to_string();
             }
         });
     }
@@ -120,16 +134,18 @@ pub fn show_settings_panel(parent: &impl IsA<Window>, shared_config: Rc<RefCell<
 
     // Default band
     sat_grid.attach(&row_label("Default band"), 0, 1, 1, 1);
-    let band_combo = ComboBoxText::new();
-    for code in BAND_CODES {
-        band_combo.append(Some(code), code);
+    let band_combo = DropDown::from_strings(BAND_CODES);
+    if let Some(pos) = BAND_CODES
+        .iter()
+        .position(|&c| c == shared_config.borrow().goes_band)
+    {
+        band_combo.set_selected(pos as u32);
     }
-    band_combo.set_active_id(Some(&shared_config.borrow().goes_band));
     {
         let cfg = Rc::clone(&shared_config);
-        band_combo.connect_changed(move |combo| {
-            if let Some(id) = combo.active_id() {
-                cfg.borrow_mut().goes_band = id.to_string();
+        band_combo.connect_selected_notify(move |combo| {
+            if let Some(&code) = BAND_CODES.get(combo.selected() as usize) {
+                cfg.borrow_mut().goes_band = code.to_string();
             }
         });
     }

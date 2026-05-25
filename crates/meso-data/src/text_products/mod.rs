@@ -43,6 +43,7 @@ struct ProductListResponse {
 struct ProductItem {
     #[serde(rename = "@id")]
     id: String,
+    #[allow(dead_code)]
     issuance_time: Option<String>,
 }
 

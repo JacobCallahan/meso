@@ -19,8 +19,8 @@
 use gdk_pixbuf::Pixbuf;
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GBox, Button, ComboBoxText, DrawingArea, Label, Orientation, Overlay, Popover, Scale,
-    SpinButton,
+    Box as GBox, Button, DrawingArea, DropDown, Label, Orientation, Overlay, Popover, Scale,
+    SpinButton, StringList,
 };
 
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -213,42 +213,43 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
     toolbar.set_margin_start(4);
     toolbar.set_margin_end(4);
 
-    let site_combo = ComboBoxText::new();
     let sites_list = sites::all_sites();
     let current_site = left_state.borrow().site_id.clone();
-    let mut active_idx = 0u32;
-    for (i, (id, name)) in sites_list.iter().enumerate() {
-        site_combo.append(Some(id.as_str()), &format!("{id} - {name}"));
-        if *id == current_site {
-            active_idx = i as u32;
-        }
-    }
-    site_combo.set_active(Some(active_idx));
+    let site_combo = {
+        let labels: Vec<String> = sites_list.iter().map(|(id, name)| format!("{id} - {name}")).collect();
+        let combo = DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
+        let active_idx = sites_list.iter().position(|(id, _)| *id == current_site).unwrap_or(0);
+        combo.set_selected(active_idx as u32);
+        combo
+    };
+    let site_ids: Vec<String> = sites_list.iter().map(|(id, _)| id.clone()).collect();
     site_combo.set_tooltip_text(Some("Select NEXRAD radar site"));
     toolbar.append(&site_combo);
 
     let active_label = Label::new(Some("L"));
     toolbar.append(&active_label);
 
-    let group_combo = ComboBoxText::new();
-    let prod_combo = ComboBoxText::new();
-    for g in RadarProduct::PRODUCT_GROUPS {
-        group_combo.append(Some(*g), *g);
-    }
-    let populate_products = |group_combo: &ComboBoxText, prod_combo: &ComboBoxText, code: &str| {
-        let selected = RadarProduct::from_code(code)
-            .filter(|p| p.is_map_supported())
-            .unwrap_or(RadarProduct::N0Q);
-        group_combo.set_active_id(Some(selected.group_name()));
-        prod_combo.remove_all();
-        for prod in RadarProduct::for_group(selected.group_name()) {
-            if prod.is_map_supported() {
-                prod_combo.append(Some(prod.code()), prod.label());
-            }
-        }
-        prod_combo.set_active_id(Some(selected.code()));
-        if prod_combo.active().is_none() {
-            prod_combo.set_active(Some(0));
+    let group_combo = DropDown::from_strings(RadarProduct::PRODUCT_GROUPS);
+    let prod_strings = StringList::new(&[]);
+    let prod_codes: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(vec![]));
+    let prod_combo = DropDown::new(Some(prod_strings.clone()), gtk4::Expression::NONE);
+    let populate_products = {
+        let prod_strings = prod_strings.clone();
+        let prod_codes = Rc::clone(&prod_codes);
+        move |group_combo: &DropDown, prod_combo: &DropDown, code: &str| {
+            let selected = RadarProduct::from_code(code)
+                .filter(|p| p.is_map_supported())
+                .unwrap_or(RadarProduct::N0Q);
+            let grp_pos = RadarProduct::PRODUCT_GROUPS
+                .iter().position(|&g| g == selected.group_name()).unwrap_or(0);
+            group_combo.set_selected(grp_pos as u32);
+            let products: Vec<RadarProduct> = RadarProduct::for_group(selected.group_name())
+                .into_iter().filter(|p| p.is_map_supported()).collect();
+            let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
+            prod_strings.splice(0, prod_strings.n_items(), &labels);
+            *prod_codes.borrow_mut() = products.iter().map(|p| p.code()).collect();
+            let code_pos = products.iter().position(|p| p.code() == selected.code()).unwrap_or(0);
+            prod_combo.set_selected(code_pos as u32);
         }
     };
     populate_products(
@@ -262,7 +263,7 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
     prod_combo.set_tooltip_text(Some("Select specific radar product"));
 
     // Tilt selector — shown only for L2 products
-    let tilt_combo = ComboBoxText::new();
+    let tilt_combo = DropDown::new(Some(StringList::new(&[])), gtk4::Expression::NONE);
     tilt_combo.set_tooltip_text(Some("Select elevation angle (L2 only)"));
     tilt_combo.set_visible(false);
     toolbar.append(&tilt_combo);
@@ -330,6 +331,8 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         let active_label = active_label.clone();
         let group_combo = group_combo.clone();
         let prod_combo = prod_combo.clone();
+        let prod_strings = prod_strings.clone();
+        let prod_codes = Rc::clone(&prod_codes);
         let left_state = Rc::clone(&left_state);
         let right_state = Rc::clone(&right_state);
         let left_overlay = left_overlay.clone();
@@ -356,17 +359,16 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             } else {
                 right_state.borrow().product
             };
-            group_combo.set_active_id(Some(selected.group_name()));
-            prod_combo.remove_all();
-            for prod in RadarProduct::for_group(selected.group_name()) {
-                if prod.is_map_supported() {
-                    prod_combo.append(Some(prod.code()), prod.label());
-                }
-            }
-            prod_combo.set_active_id(Some(selected.code()));
-            if prod_combo.active().is_none() {
-                prod_combo.set_active(Some(0));
-            }
+            let grp_pos = RadarProduct::PRODUCT_GROUPS
+                .iter().position(|&g| g == selected.group_name()).unwrap_or(0);
+            group_combo.set_selected(grp_pos as u32);
+            let products: Vec<RadarProduct> = RadarProduct::for_group(selected.group_name())
+                .into_iter().filter(|p| p.is_map_supported()).collect();
+            let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
+            prod_strings.splice(0, prod_strings.n_items(), &labels);
+            *prod_codes.borrow_mut() = products.iter().map(|p| p.code()).collect();
+            let code_pos = products.iter().position(|p| p.code() == selected.code()).unwrap_or(0);
+            prod_combo.set_selected(code_pos as u32);
         })
     };
     set_active_ui(0);
@@ -860,8 +862,6 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         let right_da_c = right_da.clone();
         let left_state_c = Rc::clone(&left_state);
         let left_da_c = left_da.clone();
-        let status_c = status.clone();
-        let btns_c = vec![refresh_btn.clone(), anim_btn.clone()];
         let toggle_btn = pane_toggle_btn.clone();
         let set_active_ui = Rc::clone(&set_active_ui);
         let anim_running_c = Rc::clone(&anim_running);
@@ -949,74 +949,74 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         let anim_btn_c = anim_btn.clone();
         let status_c = status.clone();
         let tilt_combo_c = tilt_combo.clone();
+        let site_ids_c = site_ids.clone();
         let btns = vec![refresh_btn.clone(), anim_btn.clone()];
-        site_combo.connect_changed(move |combo| {
-            if let Some(id) = combo.active_id() {
-                stop_animation(&anim_running_c, &anim_timer_c);
-                anim_btn_c.set_label("▶ Animate");
-                {
-                    let mut cfg = cfg_c.borrow_mut();
-                    cfg.radar_site = id.to_string();
-                    cfg.radar_zoom = 1.0;
-                    cfg.radar_center_lat = 0.0;
-                    cfg.radar_center_lon = 0.0;
+        site_combo.connect_selected_notify(move |combo| {
+            let id = site_ids_c[combo.selected() as usize].clone();
+            stop_animation(&anim_running_c, &anim_timer_c);
+            anim_btn_c.set_label("▶ Animate");
+            {
+                let mut cfg = cfg_c.borrow_mut();
+                cfg.radar_site = id.clone();
+                cfg.radar_zoom = 1.0;
+                cfg.radar_center_lat = 0.0;
+                cfg.radar_center_lon = 0.0;
+            }
+            for st in [&left_state_c, &right_state_c] {
+                let mut st = st.borrow_mut();
+                st.site_id = id.clone();
+                st.clear_cache();
+                if let Some(loc) = sites::site_latlon(&id) {
+                    let w = st.viewport.width;
+                    let h = st.viewport.height;
+                    st.viewport = Viewport::new(loc, w, h);
                 }
-                for st in [&left_state_c, &right_state_c] {
-                    let mut st = st.borrow_mut();
-                    st.site_id = id.to_string();
-                    st.clear_cache();
-                    if let Some(loc) = sites::site_latlon(&id) {
-                        let w = st.viewport.width;
-                        let h = st.viewport.height;
-                        st.viewport = Viewport::new(loc, w, h);
-                    }
-                }
+            }
+            trigger_load(
+                Rc::clone(&left_state_c),
+                left_da_c.clone(),
+                status_c.clone(),
+                btns.clone(),
+                tilt_combo_c.clone(),
+            );
+            refresh_warnings(Rc::clone(&left_state_c), left_da_c.clone(), Rc::clone(&cfg_c));
+            refresh_storm_tracks(Rc::clone(&left_state_c), left_da_c.clone(), Rc::clone(&cfg_c));
+            if pane_count_c.get() == 2 {
                 trigger_load(
-                    Rc::clone(&left_state_c),
-                    left_da_c.clone(),
+                    Rc::clone(&right_state_c),
+                    right_da_c.clone(),
                     status_c.clone(),
                     btns.clone(),
                     tilt_combo_c.clone(),
                 );
-                refresh_warnings(Rc::clone(&left_state_c), left_da_c.clone(), Rc::clone(&cfg_c));
-                refresh_storm_tracks(Rc::clone(&left_state_c), left_da_c.clone(), Rc::clone(&cfg_c));
-                if pane_count_c.get() == 2 {
-                    trigger_load(
-                        Rc::clone(&right_state_c),
-                        right_da_c.clone(),
-                        status_c.clone(),
-                        btns.clone(),
-                        tilt_combo_c.clone(),
-                    );
-                    refresh_warnings(
-                        Rc::clone(&right_state_c),
-                        right_da_c.clone(),
-                        Rc::clone(&cfg_c),
-                    );
-                    refresh_storm_tracks(
-                        Rc::clone(&right_state_c),
-                        right_da_c.clone(),
-                        Rc::clone(&cfg_c),
-                    );
-                }
-                left_da_c.queue_draw();
-                right_da_c.queue_draw();
+                refresh_warnings(
+                    Rc::clone(&right_state_c),
+                    right_da_c.clone(),
+                    Rc::clone(&cfg_c),
+                );
+                refresh_storm_tracks(
+                    Rc::clone(&right_state_c),
+                    right_da_c.clone(),
+                    Rc::clone(&cfg_c),
+                );
             }
+            left_da_c.queue_draw();
+            right_da_c.queue_draw();
         });
     }
 
     {
         let combo = prod_combo.clone();
-        group_combo.connect_changed(move |group_combo| {
-            if let Some(group) = group_combo.active_id() {
-                combo.remove_all();
-                for prod in RadarProduct::for_group(&group) {
-                    if prod.is_map_supported() {
-                        combo.append(Some(prod.code()), prod.label());
-                    }
-                }
-                combo.set_active(Some(0));
-            }
+        let prod_strings_g = prod_strings.clone();
+        let prod_codes_g = Rc::clone(&prod_codes);
+        group_combo.connect_selected_notify(move |group_combo| {
+            let group = RadarProduct::PRODUCT_GROUPS[group_combo.selected() as usize];
+            let products: Vec<RadarProduct> = RadarProduct::for_group(group)
+                .into_iter().filter(|p| p.is_map_supported()).collect();
+            let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
+            prod_strings_g.splice(0, prod_strings_g.n_items(), &labels);
+            *prod_codes_g.borrow_mut() = products.iter().map(|p| p.code()).collect();
+            combo.set_selected(0);
         });
     }
 
@@ -1033,10 +1033,12 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         let anim_timer_c = Rc::clone(&anim_timer);
         let anim_btn_c = anim_btn.clone();
         let tilt_combo_c = tilt_combo.clone();
+        let prod_codes_c = Rc::clone(&prod_codes);
         let btns = vec![refresh_btn.clone(), anim_btn.clone()];
-        prod_combo.connect_changed(move |combo| {
-            if let Some(code) = combo.active_id() {
-                if let Some(prod) = RadarProduct::from_code(&code).filter(|p| p.is_map_supported()) {
+        prod_combo.connect_selected_notify(move |combo| {
+            let codes = prod_codes_c.borrow();
+            if let Some(&code) = codes.get(combo.selected() as usize) {
+                if let Some(prod) = RadarProduct::from_code(code).filter(|p| p.is_map_supported()) {
                     let slot = if pane_count_c.get() == 1 { 0 } else { active_slot_c.get() };
                     let current_product = if slot == 0 {
                         left_state_c.borrow().product
@@ -1088,12 +1090,14 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
 
     // Subscribe button wiring — update label when station/product changes, toggle on click
     {
-        let site_c = site_combo.clone();
-        let prod_c = prod_combo.clone();
+        let site_ids_sub = site_ids.clone();
+        let prod_codes_sub = Rc::clone(&prod_codes);
+        let site_sel = site_combo.clone();
+        let prod_sel = prod_combo.clone();
         let btn = subscribe_btn.clone();
         let update_sub_btn = move || {
-            let station = site_c.active_id().map(|s| s.to_string()).unwrap_or_default();
-            let product = prod_c.active_id().map(|s| s.to_string()).unwrap_or_default();
+            let station = site_ids_sub.get(site_sel.selected() as usize).cloned().unwrap_or_default();
+            let product = prod_codes_sub.borrow().get(prod_sel.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
             if !station.is_empty() && !product.is_empty() {
                 let subs = load_subscriptions();
                 btn.set_label(if subs.is_radar_subscribed(&station, &product) {
@@ -1107,12 +1111,13 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
 
         // Re-check when station changes
         {
-            let site_c2 = site_combo.clone();
+            let site_ids_2 = site_ids.clone();
+            let prod_codes_2 = Rc::clone(&prod_codes);
             let prod_c2 = prod_combo.clone();
             let btn2 = subscribe_btn.clone();
-            site_combo.connect_changed(move |_| {
-                let station = site_c2.active_id().map(|s| s.to_string()).unwrap_or_default();
-                let product = prod_c2.active_id().map(|s| s.to_string()).unwrap_or_default();
+            site_combo.connect_selected_notify(move |combo| {
+                let station = site_ids_2.get(combo.selected() as usize).cloned().unwrap_or_default();
+                let product = prod_codes_2.borrow().get(prod_c2.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
                 if !station.is_empty() && !product.is_empty() {
                     let subs = load_subscriptions();
                     btn2.set_label(if subs.is_radar_subscribed(&station, &product) {
@@ -1126,12 +1131,13 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
 
         // Re-check when product changes
         {
+            let site_ids_3 = site_ids.clone();
+            let prod_codes_3 = Rc::clone(&prod_codes);
             let site_c3 = site_combo.clone();
-            let prod_c3 = prod_combo.clone();
             let btn3 = subscribe_btn.clone();
-            prod_combo.connect_changed(move |_| {
-                let station = site_c3.active_id().map(|s| s.to_string()).unwrap_or_default();
-                let product = prod_c3.active_id().map(|s| s.to_string()).unwrap_or_default();
+            prod_combo.connect_selected_notify(move |combo| {
+                let station = site_ids_3.get(site_c3.selected() as usize).cloned().unwrap_or_default();
+                let product = prod_codes_3.borrow().get(combo.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
                 if !station.is_empty() && !product.is_empty() {
                     let subs = load_subscriptions();
                     btn3.set_label(if subs.is_radar_subscribed(&station, &product) {
@@ -1145,12 +1151,14 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
 
         // Toggle on click
         {
+            let site_ids_4 = site_ids.clone();
+            let prod_codes_4 = Rc::clone(&prod_codes);
             let site_c4 = site_combo.clone();
             let prod_c4 = prod_combo.clone();
             let btn4 = subscribe_btn.clone();
             subscribe_btn.connect_clicked(move |_| {
-                let station = site_c4.active_id().map(|s| s.to_string()).unwrap_or_default();
-                let product = prod_c4.active_id().map(|s| s.to_string()).unwrap_or_default();
+                let station = site_ids_4.get(site_c4.selected() as usize).cloned().unwrap_or_default();
+                let product = prod_codes_4.borrow().get(prod_c4.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
                 if station.is_empty() || product.is_empty() {
                     return;
                 }
@@ -1215,12 +1223,8 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         let status_tc = status.clone();
         let active_slot_tc = Rc::clone(&active_slot);
         let pane_count_tc = Rc::clone(&pane_count);
-        tilt_combo.connect_changed(move |combo| {
-            let id = match combo.active_id() {
-                Some(id) => id,
-                None => return,
-            };
-            let tilt_num: u8 = match id.parse() { Ok(v) => v, Err(_) => return };
+        tilt_combo.connect_selected_notify(move |combo| {
+            let sel = combo.selected() as usize;
             let slot = if pane_count_tc.get() == 1 { 0 } else { active_slot_tc.get() };
             let (state_ref, da_ref) = if slot == 0 {
                 (Rc::clone(&left_state_tc), left_da_tc.clone())
@@ -1228,11 +1232,9 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                 (Rc::clone(&right_state_tc), right_da_tc.clone())
             };
 
-            // Find the tilt index for this elevation_num
             let (tilt_idx, raw_bytes, velocity) = {
                 let st = state_ref.borrow();
-                let idx = st.l2_tilts.iter().position(|t| t.elevation_num == tilt_num)
-                    .unwrap_or(0);
+                let idx = sel.min(st.l2_tilts.len().saturating_sub(1));
                 let bytes = st.cached_l2_bytes.clone();
                 let vel = st.product == RadarProduct::L2Velocity;
                 (idx, bytes, vel)
@@ -1609,8 +1611,11 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
 
     let change_site_fn: Rc<dyn Fn(&str)> = {
         let site_combo = site_combo.clone();
+        let site_ids = site_ids.clone();
         Rc::new(move |site_id: &str| {
-            site_combo.set_active_id(Some(site_id));
+            if let Some(pos) = site_ids.iter().position(|id| id == site_id) {
+                site_combo.set_selected(pos as u32);
+            }
         })
     };
     (vbox, change_site_fn)
@@ -2324,7 +2329,7 @@ fn trigger_load(
     drawing_area: DrawingArea,
     status: Label,
     btns: Vec<Button>,
-    tilt_combo: ComboBoxText,
+    tilt_combo: DropDown,
 ) {
     let product = state.borrow().product.clone();
     match product {
@@ -2410,7 +2415,7 @@ fn load_level2(
     status: Label,
     velocity: bool,
     btns: Vec<Button>,
-    tilt_combo: ComboBoxText,
+    tilt_combo: DropDown,
 ) {
     let site_id = state.borrow().site_id.clone();
     let tilt_idx = state.borrow().l2_tilt_idx;
@@ -2470,19 +2475,16 @@ fn load_level2(
                                 }
                                 // Update tilt selector (outside state borrow)
                                 {
-                                    let block = tilt_combo.connect_changed(|_| {});
-                                    tilt_combo.remove_all();
-                                    for t in &tilts {
-                                        tilt_combo.append(
-                                            Some(&t.elevation_num.to_string()),
-                                            &format!("{:.1}°", t.angle_deg),
-                                        );
+                                    let labels: Vec<String> = tilts.iter()
+                                        .map(|t| format!("{:.1}°", t.angle_deg))
+                                        .collect();
+                                    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                                    if let Some(strings) = tilt_combo.model()
+                                        .and_then(|m| m.downcast::<gtk4::StringList>().ok())
+                                    {
+                                        strings.splice(0, strings.n_items(), &label_refs);
                                     }
-                                    let active_elev_num = tilts.get(safe_tilt)
-                                        .map(|t| t.elevation_num.to_string())
-                                        .unwrap_or_default();
-                                    tilt_combo.set_active_id(Some(&active_elev_num));
-                                    tilt_combo.disconnect(block);
+                                    tilt_combo.set_selected(safe_tilt as u32);
                                 }
                                 tilt_combo.set_visible(true);
                                 match img {
@@ -2828,22 +2830,6 @@ fn remove_nearest_track_point(cfg: &mut Config, clicked: &LatLon, max_distance_k
     true
 }
 
-fn add_named_location_at_click(cfg: &mut Config, lat: f64, lon: f64) -> String {
-    let mut idx = cfg.locations.len() + 1;
-    loop {
-        let candidate = format!("Marker {idx}");
-        if !cfg.locations.iter().any(|l| l.name == candidate) {
-            cfg.locations.push(NamedLocation {
-                name: candidate.clone(),
-                lat,
-                lon,
-            });
-            return candidate;
-        }
-        idx += 1;
-    }
-}
-
 fn show_location_editor_dialog(
     default_name: &str,
     lat: f64,
@@ -2853,15 +2839,14 @@ fn show_location_editor_dialog(
     left_da: gtk4::DrawingArea,
     right_da: gtk4::DrawingArea,
 ) {
-    use gtk4::{Dialog, Entry, Label, Orientation};
+    use gtk4::{Box as GBox, Button, Entry, Label, Orientation};
 
-    let dialog = Dialog::new();
-    dialog.set_title(Some("Add Location"));
-    dialog.set_modal(true);
-    dialog.set_default_size(300, 200);
+    let win = gtk4::Window::new();
+    win.set_title(Some("Add Location"));
+    win.set_modal(true);
+    win.set_default_size(300, 220);
 
-    let content = dialog.content_area();
-    content.set_spacing(6);
+    let content = GBox::new(Orientation::Vertical, 6);
     content.set_margin_top(12);
     content.set_margin_bottom(12);
     content.set_margin_start(12);
@@ -2891,62 +2876,72 @@ fn show_location_editor_dialog(
     content.append(&lon_label);
     content.append(&lon_entry);
 
-    dialog.add_button("Cancel", gtk4::ResponseType::Cancel);
-    dialog.add_button("Save", gtk4::ResponseType::Accept);
+    let btn_row = GBox::new(Orientation::Horizontal, 8);
+    btn_row.set_halign(gtk4::Align::End);
+    btn_row.set_margin_top(8);
+    let cancel_btn = Button::with_label("Cancel");
+    let save_btn = Button::with_label("Save");
+    save_btn.add_css_class("suggested-action");
+    btn_row.append(&cancel_btn);
+    btn_row.append(&save_btn);
+    content.append(&btn_row);
 
+    win.set_child(Some(&content));
+
+    let win_cancel = win.clone();
+    cancel_btn.connect_clicked(move |_| win_cancel.close());
+
+    let win_save = win.clone();
     let name_entry_c = name_entry.clone();
     let lat_entry_c = lat_entry.clone();
     let lon_entry_c = lon_entry.clone();
+    save_btn.connect_clicked(move |_| {
+        let new_name = name_entry_c.text().trim().to_string();
+        let new_lat_s = lat_entry_c.text();
+        let new_lon_s = lon_entry_c.text();
 
-    dialog.connect_response(move |dlg, resp| {
-        if resp == gtk4::ResponseType::Accept {
-            let new_name = name_entry_c.text().trim().to_string();
-            let new_lat_s = lat_entry_c.text();
-            let new_lon_s = lon_entry_c.text();
-
-            if new_name.is_empty() {
-                dlg.close();
-                return;
-            }
-
-            let new_lat = match new_lat_s.trim().parse::<f64>() {
-                Ok(v) => v,
-                Err(_) => {
-                    dlg.close();
-                    return;
-                }
-            };
-
-            let new_lon = match new_lon_s.trim().parse::<f64>() {
-                Ok(v) => v,
-                Err(_) => {
-                    dlg.close();
-                    return;
-                }
-            };
-
-            if new_lat < -90.0 || new_lat > 90.0 || new_lon < -180.0 || new_lon > 180.0 {
-                dlg.close();
-                return;
-            }
-
-            {
-                let mut cfg = shared_config.borrow_mut();
-                cfg.locations.push(NamedLocation {
-                    name: new_name.clone(),
-                    lat: new_lat,
-                    lon: new_lon,
-                });
-            }
-
-            status.set_text(&format!("Added location: {new_name}"));
-            left_da.queue_draw();
-            right_da.queue_draw();
+        if new_name.is_empty() {
+            win_save.close();
+            return;
         }
-        dlg.close();
+
+        let new_lat = match new_lat_s.trim().parse::<f64>() {
+            Ok(v) => v,
+            Err(_) => {
+                win_save.close();
+                return;
+            }
+        };
+
+        let new_lon = match new_lon_s.trim().parse::<f64>() {
+            Ok(v) => v,
+            Err(_) => {
+                win_save.close();
+                return;
+            }
+        };
+
+        if new_lat < -90.0 || new_lat > 90.0 || new_lon < -180.0 || new_lon > 180.0 {
+            win_save.close();
+            return;
+        }
+
+        {
+            let mut cfg = shared_config.borrow_mut();
+            cfg.locations.push(NamedLocation {
+                name: new_name.clone(),
+                lat: new_lat,
+                lon: new_lon,
+            });
+        }
+
+        status.set_text(&format!("Added location: {new_name}"));
+        left_da.queue_draw();
+        right_da.queue_draw();
+        win_save.close();
     });
 
-    dialog.show();
+    win.present();
 }
 
 

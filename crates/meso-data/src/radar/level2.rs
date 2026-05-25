@@ -126,7 +126,7 @@ pub fn decompress_level2(compressed: &[u8]) -> Result<Vec<u8>> {
 /// `tilt_idx`  — which elevation tilt to decode (0 = lowest).  If the index
 ///               exceeds the number of available tilts, the highest is used.
 pub fn decode(data: &[u8], velocity: bool, tilt_idx: usize) -> Result<Level2Data> {
-    let moment_type = if velocity {
+    let _moment_type = if velocity {
         VELOCITY_HIGH
     } else {
         REFLECTIVITY_HIGH
@@ -135,8 +135,6 @@ pub fn decode(data: &[u8], velocity: bool, tilt_idx: usize) -> Result<Level2Data
     let mut cursor = Cursor::new(data);
     let mut records_ref: Vec<RecordMeta> = Vec::new();
     let mut records_vel: Vec<RecordMeta> = Vec::new();
-    let mut vcp_seen = false;
-    let mut vcp: i16 = 0;
     let mut extra_offset: u64 = 0;
     let mut record_number: u64 = 0;
 
@@ -164,11 +162,6 @@ pub fn decode(data: &[u8], velocity: bool, tilt_idx: usize) -> Result<Level2Data
         }
 
         let meta = parse_record_meta(&mut cursor, message_type, msg_offset)?;
-
-        if !vcp_seen {
-            vcp = meta.vcp;
-            vcp_seen = true;
-        }
 
         if message_type == 31 {
             if meta.has_ref {
@@ -312,7 +305,7 @@ pub fn list_tilts(data: &[u8], velocity: bool) -> Result<Vec<TiltInfo>> {
 #[derive(Debug, Clone)]
 struct RecordMeta {
     message_offset: u64,
-    message_type: u8,
+    _message_type: u8,
     millis: i32,
     julian_date: i16,
     elevation_num: i16,
@@ -332,7 +325,7 @@ fn parse_record_meta(
 ) -> Result<RecordMeta> {
     let mut meta = RecordMeta {
         message_offset: msg_offset,
-        message_type,
+        _message_type: message_type,
         millis: 0,
         julian_date: 0,
         elevation_num: 0,

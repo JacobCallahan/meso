@@ -3,7 +3,10 @@
  */
 
 use gtk4::prelude::*;
-use gtk4::{CheckButton, ComboBoxText, Dialog, Label, Orientation, ResponseType, Separator, Window};
+use gtk4::{
+    Box as GBox, Button, CheckButton, DropDown, Label, Orientation, ScrolledWindow, Separator,
+    Window,
+};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -15,14 +18,13 @@ pub fn show_overlay_dialog(
     shared_cfg: Rc<RefCell<Config>>,
     on_apply: impl Fn() + 'static,
 ) {
-    let dialog = Dialog::new();
-    dialog.set_title(Some("Radar Settings"));
-    dialog.set_transient_for(Some(parent));
-    dialog.set_modal(true);
-    dialog.set_default_size(360, 320);
+    let win = gtk4::Window::new();
+    win.set_title(Some("Radar Settings"));
+    win.set_transient_for(Some(parent));
+    win.set_modal(true);
+    win.set_default_size(360, 400);
 
-    let content = dialog.content_area();
-    content.set_spacing(8);
+    let content = GBox::new(Orientation::Vertical, 8);
     content.set_margin_top(16);
     content.set_margin_bottom(8);
     content.set_margin_start(16);
@@ -68,36 +70,51 @@ pub fn show_overlay_dialog(
     palettes_hdr.set_halign(gtk4::Align::Start);
     content.append(&palettes_hdr);
 
-    let ref_row = gtk4::Box::new(Orientation::Horizontal, 8);
+    let ref_row = GBox::new(Orientation::Horizontal, 8);
     let ref_lbl = Label::new(Some("Reflectivity"));
     ref_lbl.set_halign(gtk4::Align::Start);
-    let ref_combo = ComboBoxText::new();
-    for name in REF_PALETTE_NAMES {
-        ref_combo.append(Some(name), name);
+    let ref_combo = DropDown::from_strings(REF_PALETTE_NAMES);
+    if let Some(pos) = REF_PALETTE_NAMES
+        .iter()
+        .position(|&n| n == shared_cfg.borrow().radar_palette_ref)
+    {
+        ref_combo.set_selected(pos as u32);
     }
-    ref_combo.set_active_id(Some(&shared_cfg.borrow().radar_palette_ref));
     ref_row.append(&ref_lbl);
     ref_row.append(&ref_combo);
     content.append(&ref_row);
 
-    let vel_row = gtk4::Box::new(Orientation::Horizontal, 8);
+    let vel_row = GBox::new(Orientation::Horizontal, 8);
     let vel_lbl = Label::new(Some("Velocity"));
     vel_lbl.set_halign(gtk4::Align::Start);
-    let vel_combo = ComboBoxText::new();
-    for name in VEL_PALETTE_NAMES {
-        vel_combo.append(Some(name), name);
+    let vel_combo = DropDown::from_strings(VEL_PALETTE_NAMES);
+    if let Some(pos) = VEL_PALETTE_NAMES
+        .iter()
+        .position(|&n| n == shared_cfg.borrow().radar_palette_vel)
+    {
+        vel_combo.set_selected(pos as u32);
     }
-    vel_combo.set_active_id(Some(&shared_cfg.borrow().radar_palette_vel));
     vel_row.append(&vel_lbl);
     vel_row.append(&vel_combo);
     content.append(&vel_row);
 
     content.append(&Separator::new(Orientation::Horizontal));
 
-    dialog.add_button("Close", ResponseType::Close);
+    let close_btn = Button::with_label("Close");
+    close_btn.set_halign(gtk4::Align::End);
+    close_btn.set_margin_top(4);
+    close_btn.set_margin_bottom(8);
+    content.append(&close_btn);
+
+    let scroll = ScrolledWindow::builder()
+        .child(&content)
+        .vscrollbar_policy(gtk4::PolicyType::Automatic)
+        .build();
+    win.set_child(Some(&scroll));
 
     let cfg_close = Rc::clone(&shared_cfg);
-    dialog.connect_response(move |dlg, _| {
+    let win_c = win.clone();
+    close_btn.connect_clicked(move |_| {
         {
             let mut cfg = cfg_close.borrow_mut();
             cfg.radar_show_warnings = chk_warnings.is_active();
@@ -107,16 +124,16 @@ pub fn show_overlay_dialog(
             cfg.radar_show_track_points = chk_track_points.is_active();
             cfg.radar_show_track_lines = chk_track_lines.is_active();
             cfg.radar_show_track_vector = chk_track_vector.is_active();
-            if let Some(id) = ref_combo.active_id() {
-                cfg.radar_palette_ref = id.to_string();
+            if let Some(name) = REF_PALETTE_NAMES.get(ref_combo.selected() as usize) {
+                cfg.radar_palette_ref = name.to_string();
             }
-            if let Some(id) = vel_combo.active_id() {
-                cfg.radar_palette_vel = id.to_string();
+            if let Some(name) = VEL_PALETTE_NAMES.get(vel_combo.selected() as usize) {
+                cfg.radar_palette_vel = name.to_string();
             }
         }
         on_apply();
-        dlg.close();
+        win_c.close();
     });
 
-    dialog.present();
+    win.present();
 }

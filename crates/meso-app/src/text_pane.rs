@@ -7,8 +7,8 @@
 
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GBox, ComboBoxText, Entry, Label, Orientation, PolicyType, ScrolledWindow, TextView,
-    WrapMode,
+    Box as GBox, DropDown, Entry, Label, Orientation, PolicyType, ScrolledWindow, StringList,
+    TextView, WrapMode,
 };
 
 use std::cell::RefCell;
@@ -43,11 +43,15 @@ pub fn build_text_pane(default_wfo: &str, radar_site: &str) -> GBox {
     wfo_entry.set_max_length(4);
     wfo_entry.set_width_chars(5);
 
-    let prod_combo = ComboBoxText::new();
-    for (code, label) in PRODUCT_TYPES {
-        prod_combo.append(Some(code), &format!("{code} — {label}"));
-    }
-    prod_combo.set_active(Some(0)); // default to AFD
+    let prod_displays: Vec<String> = PRODUCT_TYPES
+        .iter()
+        .map(|(code, label)| format!("{code} — {label}"))
+        .collect();
+    let prod_ids: Rc<Vec<&'static str>> =
+        Rc::new(PRODUCT_TYPES.iter().map(|(code, _)| *code).collect());
+    let prod_model = StringList::new(&prod_displays.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let prod_combo = DropDown::new(Some(prod_model), gtk4::Expression::NONE);
+    prod_combo.set_selected(0); // default to AFD
 
     let status = Label::new(Some("Ready"));
     status.set_hexpand(true);
@@ -88,8 +92,10 @@ pub fn build_text_pane(default_wfo: &str, radar_site: &str) -> GBox {
     // Wire product combo
     {
         let state_c = Rc::clone(&state);
-        prod_combo.connect_changed(move |combo| {
-            if let Some(id) = combo.active_id() {
+        let prod_ids_c = Rc::clone(&prod_ids);
+        prod_combo.connect_selected_notify(move |combo| {
+            let idx = combo.selected() as usize;
+            if let Some(&id) = prod_ids_c.get(idx) {
                 state_c.borrow_mut().product_type = id.to_string();
             }
         });
@@ -163,7 +169,6 @@ pub fn build_text_pane(default_wfo: &str, radar_site: &str) -> GBox {
                             let full = format!("{}{}", header, product.text);
                             tv_c2.buffer().set_text(&full);
                             // Scroll to top
-                            let start = tv_c2.buffer().start_iter();
                             tv_c2.scroll_to_iter(
                                 &mut tv_c2.buffer().start_iter(),
                                 0.0,
@@ -190,7 +195,7 @@ pub fn build_text_pane(default_wfo: &str, radar_site: &str) -> GBox {
 
     {
         let do_fetch_c = do_fetch.clone();
-        prod_combo.connect_changed(move |_| do_fetch_c());
+        prod_combo.connect_selected_notify(move |_| do_fetch_c());
     }
     {
         let do_fetch_c = do_fetch.clone();

@@ -15,9 +15,9 @@
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GBox, Button, CellRendererText, ComboBoxText, DrawingArea, Label, Orientation, Paned,
-    PolicyType, Scale, ScrolledWindow, SearchEntry, ToggleButton, TreeModelFilter, TreeStore,
-    TreeView, TreeViewColumn,
+    Box as GBox, Button, CellRendererText, DrawingArea, DropDown, Label, Orientation, Paned,
+    PolicyType, Scale, ScrolledWindow, SearchEntry, StringList, ToggleButton, TreeModelFilter,
+    TreeStore, TreeView, TreeViewColumn,
 };
 
 use std::cell::{Cell, RefCell};
@@ -39,6 +39,7 @@ enum ActiveModel {
 }
 
 impl ActiveModel {
+    #[allow(dead_code)]
     fn label(&self) -> &str {
         match self {
             ActiveModel::Sref => "SREF",
@@ -146,7 +147,7 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     } else {
         let p_clone = paned.clone();
         paned.connect_realize(move |_| {
-            let w = p_clone.allocated_width();
+            let w = p_clone.width();
             if w > 10 {
                 p_clone.set_position((w as f64 * 0.74) as i32);
             }
@@ -185,7 +186,7 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     // Draw callback
     {
         let state_d = Rc::clone(&state);
-        drawing_area.set_draw_func(move |da, cr, w, h| {
+        drawing_area.set_draw_func(move |_da, cr, w, h| {
             let st = state_d.borrow();
             let widget_w = w as f64;
             let widget_h = h as f64;
@@ -364,19 +365,16 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     model_toolbar.set_margin_top(4);
     model_toolbar.set_margin_bottom(2);
 
-    let model_combo = ComboBoxText::new();
+    const MODEL_IDS: &[&str] = &["sref", "gfs", "nam", "rap", "hrrr"];
+    let model_combo = DropDown::from_strings(&["SREF", "GFS", "NAM", "RAP", "HRRR"]);
     model_combo.set_tooltip_text(Some("Model type"));
-    for (id, lbl) in &[("sref","SREF"),("gfs","GFS"),("nam","NAM"),("rap","RAP"),("hrrr","HRRR")] {
-        model_combo.append(Some(id), lbl);
-    }
-    // Don't set active_id here — we'll do it after the tree + handler are wired
+    // Don't set active here — we'll do it after the tree + handler are wired
     model_combo.set_hexpand(true);
 
-    let sector_combo = ComboBoxText::new();
+    let sector_strings = StringList::new(&["CONUS"]);
+    let sector_combo = DropDown::new(Some(sector_strings.clone()), gtk4::Expression::NONE);
     sector_combo.set_tooltip_text(Some("Area / Sector"));
-    // Initial sectors: will be repopulated when model_combo fires
-    sector_combo.append(Some("CONUS"), "CONUS");
-    sector_combo.set_active_id(Some("CONUS"));
+    sector_combo.set_selected(0);
     sector_combo.set_visible(!matches!(initial_active_model, ActiveModel::Sref));
 
     model_toolbar.append(&model_combo);
@@ -694,11 +692,10 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         let at_m = Rc::clone(&anim_timer);
         let anim_btn_m = anim_btn.clone();
 
-        model_combo.connect_changed(move |combo| {
-            let id = match combo.active_id() {
-                Some(id) => id.to_string(),
-                None => return,
-            };
+        let sector_strings_m = sector_strings.clone();
+
+        model_combo.connect_selected_notify(move |combo| {
+            let id = MODEL_IDS.get(combo.selected() as usize).copied().unwrap_or("sref");
             // Stop any running animation
             if ar_m.get() {
                 ar_m.set(false);
@@ -708,7 +705,7 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
                 anim_btn_m.set_label("▶ Animate");
             }
 
-            let new_model = match id.as_str() {
+            let new_model = match id {
                 "gfs"  => ActiveModel::Ncep(ncep::NcepModel::Gfs),
                 "nam"  => ActiveModel::Ncep(ncep::NcepModel::Nam),
                 "rap"  => ActiveModel::Ncep(ncep::NcepModel::Rap),
@@ -730,12 +727,10 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
                 }
             };
             if !sectors.is_empty() {
-                // Rebuild sector combo
-                sector_combo_m.remove_all();
-                for s in &sectors {
-                    sector_combo_m.append(Some(s), s);
-                }
-                sector_combo_m.set_active_id(Some("CONUS"));
+                // Rebuild sector combo via the shared StringList
+                sector_strings_m.splice(0, sector_strings_m.n_items(), &sectors);
+                let conus_pos = sectors.iter().position(|&s| s == "CONUS").unwrap_or(0);
+                sector_combo_m.set_selected(conus_pos as u32);
             }
 
             // Update state
@@ -809,11 +804,13 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     // ── Sector combo handler ──────────────────────────────────────────────────
     {
         let state_s = Rc::clone(&state);
-        sector_combo.connect_changed(move |combo| {
-            if let Some(sector) = combo.active_id() {
+        let sector_strings_s = sector_strings.clone();
+        sector_combo.connect_selected_notify(move |combo| {
+            if let Some(obj) = sector_strings_s.string(combo.selected()) {
+                let sector = obj.as_str().to_string();
                 let mut st = state_s.borrow_mut();
-                if st.ncep_sector != sector.as_str() {
-                    st.ncep_sector = sector.to_string();
+                if st.ncep_sector != sector {
+                    st.ncep_sector = sector;
                     st.ncep_run = String::new(); // invalidate cached run
                     st.anim_frames.clear();
                     st.anim_timestamps.clear();
@@ -822,18 +819,25 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         });
     }
 
-    // Restore saved model type — fires connect_changed which repopulates tree + sector combo
-    model_combo.set_active_id(Some(saved_model_type.as_str()));
+    // Restore saved model type — fires connect_selected_notify which repopulates tree + sector combo
+    if let Some(pos) = MODEL_IDS.iter().position(|&id| id == saved_model_type) {
+        model_combo.set_selected(pos as u32);
+    }
     // Restore saved sector after the model combo has repopulated the sector combo
     if saved_model_type != "sref" {
-        sector_combo.set_active_id(Some(saved_sector.as_str()));
+        let n = sector_strings.n_items();
+        let saved = saved_sector.as_str();
+        let pos = (0..n)
+            .find(|&i| sector_strings.string(i).map_or(false, |s| s == saved))
+            .unwrap_or(0);
+        sector_combo.set_selected(pos);
     }
 
-    // Save model type + sector when model_combo changes (persist in config)
+    // Save model type + sector when combos change (persist in config)
     {
         let cfg_persist = Rc::clone(&shared_config);
         let state_persist = Rc::clone(&state);
-        model_combo.connect_changed(move |_| {
+        model_combo.connect_selected_notify(move |_| {
             let st = state_persist.borrow();
             let type_str = match &st.active_model {
                 ActiveModel::Sref     => "sref",
@@ -845,7 +849,7 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     {
         let cfg_persist = Rc::clone(&shared_config);
         let state_persist = Rc::clone(&state);
-        sector_combo.connect_changed(move |_| {
+        sector_combo.connect_selected_notify(move |_| {
             cfg_persist.borrow_mut().ncep_sector = state_persist.borrow().ncep_sector.clone();
         });
     }

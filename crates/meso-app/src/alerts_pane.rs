@@ -11,8 +11,8 @@
 use glib::markup_escape_text;
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GBox, Button, ComboBoxText, Label, ListBox, ListBoxRow, Orientation, PolicyType,
-    ScrolledWindow, Separator, TextView, WrapMode,
+    Box as GBox, Button, DropDown, Label, ListBox, ListBoxRow, Orientation, PolicyType,
+    ScrolledWindow, Separator, StringList, TextView, WrapMode,
 };
 
 use std::cell::RefCell;
@@ -102,18 +102,24 @@ pub fn build_alerts_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     toolbar.set_margin_top(4);
     toolbar.set_margin_bottom(4);
 
-    let area_combo = ComboBoxText::new();
-    for (code, label) in AREAS {
-        area_combo.append(Some(code), &format!("{code} — {label}"));
-    }
+    let area_displays: Vec<String> = AREAS
+        .iter()
+        .map(|(code, label)| format!("{code} — {label}"))
+        .collect();
+    let area_ids: Rc<Vec<&'static str>> =
+        Rc::new(AREAS.iter().map(|(code, _)| *code).collect());
+    let area_model =
+        StringList::new(&area_displays.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let area_combo = DropDown::new(Some(area_model), gtk4::Expression::NONE);
 
-    // Default to config location state (derived from nearest WFO isn't great, default NC-area)
-    // We'll use the default active_location lat to pick a reasonable default
+    // Default to config location state
     let default_area = {
         let cfg = shared_config.borrow();
         state_from_lat_lon(cfg.location_lat, cfg.location_lon)
     };
-    area_combo.set_active_id(Some(&default_area));
+    if let Some(pos) = area_ids.iter().position(|&id| id == default_area) {
+        area_combo.set_selected(pos as u32);
+    }
 
     let refresh_btn = Button::with_label("⟳ Refresh");
     let status = Label::new(Some("Loading alerts..."));
@@ -231,22 +237,25 @@ pub fn build_alerts_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         let st = status.clone();
         let dh = detail_header.clone();
         let dt = detail_tv.clone();
-        area_combo.connect_changed(move |combo| {
-            if let Some(id) = combo.active_id() {
-                let area = id.to_string();
-                state_c.borrow_mut().area = area.clone();
-                // Clear detail when switching area
-                dh.set_markup("");
-                dt.buffer().set_text("");
-                load_alerts(
-                    area,
-                    Rc::clone(&state_c),
-                    lb.clone(),
-                    st.clone(),
-                    dh.clone(),
-                    dt.clone(),
-                );
-            }
+        let area_ids_c = Rc::clone(&area_ids);
+        area_combo.connect_selected_notify(move |combo| {
+            let area = area_ids_c
+                .get(combo.selected() as usize)
+                .copied()
+                .unwrap_or("US")
+                .to_string();
+            state_c.borrow_mut().area = area.clone();
+            // Clear detail when switching area
+            dh.set_markup("");
+            dt.buffer().set_text("");
+            load_alerts(
+                area,
+                Rc::clone(&state_c),
+                lb.clone(),
+                st.clone(),
+                dh.clone(),
+                dt.clone(),
+            );
         });
     }
 

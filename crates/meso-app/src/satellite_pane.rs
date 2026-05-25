@@ -16,7 +16,7 @@ use gdk_pixbuf::Pixbuf;
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GBox, Button, ComboBoxText, DrawingArea, Label, Orientation, Overlay, Scale, SpinButton,
+    Box as GBox, Button, DrawingArea, DropDown, Label, Orientation, Overlay, Scale, SpinButton,
 };
 
 use std::cell::{Cell, RefCell};
@@ -83,30 +83,19 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
     let toolbar = GBox::new(Orientation::Horizontal, 4);
 
     // Sector selector
-    let sector_combo = ComboBoxText::new();
+    let sector_labels: Vec<&str> = SECTORS.iter().map(|s| s.name).collect();
+    let sector_combo = DropDown::from_strings(&sector_labels);
     let current_sector = state.borrow().sector.clone();
-    let mut sector_active = 0u32;
-    for (i, sec) in SECTORS.iter().enumerate() {
-        sector_combo.append(Some(sec.code), sec.name);
-        if sec.code == current_sector {
-            sector_active = i as u32;
-        }
-    }
-    sector_combo.set_active(Some(sector_active));
+    let sector_active = SECTORS.iter().position(|s| s.code == current_sector).unwrap_or(0);
+    sector_combo.set_selected(sector_active as u32);
     sector_combo.set_tooltip_text(Some("Select GOES satellite sector"));
     toolbar.append(&sector_combo);
 
     // Band selector
-    let band_combo = ComboBoxText::new();
+    let band_combo = DropDown::from_strings(BAND_LABELS);
     let current_band = state.borrow().band.clone();
-    let mut band_active = 0u32;
-    for (i, (code, label)) in BAND_CODES.iter().zip(BAND_LABELS.iter()).enumerate() {
-        band_combo.append(Some(*code), *label);
-        if *code == current_band {
-            band_active = i as u32;
-        }
-    }
-    band_combo.set_active(Some(band_active));
+    let band_active = BAND_CODES.iter().position(|&c| c == current_band).unwrap_or(0);
+    band_combo.set_selected(band_active as u32);
     band_combo.set_tooltip_text(Some("Select ABI spectral band"));
     toolbar.append(&band_combo);
 
@@ -389,8 +378,10 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
         let anim_btn_sec = anim_btn.clone();
         let refresh_btn_sec = refresh_btn.clone();
         let tl_sec = timeline.clone();
-        sector_combo.connect_changed(move |combo| {
-            if let Some(code) = combo.active_id() {
+        sector_combo.connect_selected_notify(move |combo| {
+            let idx = combo.selected() as usize;
+            if let Some(sec) = SECTORS.get(idx) {
+                let code = sec.code.to_string();
                 if ar_c.get() {
                     ar_c.set(false);
                     if let Some(id) = at_c.borrow_mut().take() {
@@ -406,12 +397,13 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
                     st.anim_index = 0;
                 }
                 tl_sec.set_sensitive(false);
-                cfg_c.borrow_mut().goes_sector = code.to_string();
+                cfg_c.borrow_mut().goes_sector = code.clone();
                 {
                     let mut st = state_c.borrow_mut();
-                    st.sector = code.to_string();
-                    if let Some(b) = band_c.active_id() {
-                        st.band = b.to_string();
+                    st.sector = code;
+                    let band_idx = band_c.selected() as usize;
+                    if let Some(&bc) = BAND_CODES.get(band_idx) {
+                        st.band = bc.to_string();
                     }
                 }
                 let btns = vec![refresh_btn_sec.clone(), anim_btn_sec.clone()];
@@ -432,8 +424,10 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
         let anim_btn_band = anim_btn.clone();
         let refresh_btn_band = refresh_btn.clone();
         let tl_band = timeline.clone();
-        band_combo.connect_changed(move |combo| {
-            if let Some(code) = combo.active_id() {
+        band_combo.connect_selected_notify(move |combo| {
+            let idx = combo.selected() as usize;
+            if let Some(&code) = BAND_CODES.get(idx) {
+                let code = code.to_string();
                 if ar_c.get() {
                     ar_c.set(false);
                     if let Some(id) = at_c.borrow_mut().take() {
@@ -449,12 +443,13 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
                     st.anim_index = 0;
                 }
                 tl_band.set_sensitive(false);
-                cfg_c.borrow_mut().goes_band = code.to_string();
+                cfg_c.borrow_mut().goes_band = code.clone();
                 {
                     let mut st = state_c.borrow_mut();
-                    st.band = code.to_string();
-                    if let Some(s) = sec_c.active_id() {
-                        st.sector = s.to_string();
+                    st.band = code;
+                    let sec_idx = sec_c.selected() as usize;
+                    if let Some(s) = SECTORS.get(sec_idx) {
+                        st.sector = s.code.to_string();
                     }
                 }
                 let btns = vec![refresh_btn_band.clone(), anim_btn_band.clone()];
@@ -553,8 +548,8 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
 
         // Initial state
         {
-            let sector = sector_c.active_id().map(|s| s.to_string()).unwrap_or_default();
-            let band = band_c.active_id().map(|s| s.to_string()).unwrap_or_default();
+            let sector = SECTORS.get(sector_c.selected() as usize).map(|s| s.code.to_string()).unwrap_or_default();
+            let band = BAND_CODES.get(band_c.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
             if !sector.is_empty() && !band.is_empty() {
                 let subs = load_subscriptions();
                 btn.set_label(if subs.is_sat_subscribed(&sector, &band) { "🔵" } else { "⚫" });
@@ -563,12 +558,11 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
 
         // Re-check when sector changes
         {
-            let sector_c2 = sector_combo.clone();
             let band_c2 = band_combo.clone();
             let btn2 = subscribe_btn.clone();
-            sector_combo.connect_changed(move |_| {
-                let sector = sector_c2.active_id().map(|s| s.to_string()).unwrap_or_default();
-                let band = band_c2.active_id().map(|s| s.to_string()).unwrap_or_default();
+            sector_combo.connect_selected_notify(move |combo| {
+                let sector = SECTORS.get(combo.selected() as usize).map(|s| s.code.to_string()).unwrap_or_default();
+                let band = BAND_CODES.get(band_c2.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
                 if !sector.is_empty() && !band.is_empty() {
                     let subs = load_subscriptions();
                     btn2.set_label(if subs.is_sat_subscribed(&sector, &band) { "🔵" } else { "⚫" });
@@ -579,11 +573,10 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
         // Re-check when band changes
         {
             let sector_c3 = sector_combo.clone();
-            let band_c3 = band_combo.clone();
             let btn3 = subscribe_btn.clone();
-            band_combo.connect_changed(move |_| {
-                let sector = sector_c3.active_id().map(|s| s.to_string()).unwrap_or_default();
-                let band = band_c3.active_id().map(|s| s.to_string()).unwrap_or_default();
+            band_combo.connect_selected_notify(move |combo| {
+                let sector = SECTORS.get(sector_c3.selected() as usize).map(|s| s.code.to_string()).unwrap_or_default();
+                let band = BAND_CODES.get(combo.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
                 if !sector.is_empty() && !band.is_empty() {
                     let subs = load_subscriptions();
                     btn3.set_label(if subs.is_sat_subscribed(&sector, &band) { "🔵" } else { "⚫" });
@@ -593,8 +586,8 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
 
         // Toggle on click
         subscribe_btn.connect_clicked(move |_| {
-            let sector = sector_c.active_id().map(|s| s.to_string()).unwrap_or_default();
-            let band = band_c.active_id().map(|s| s.to_string()).unwrap_or_default();
+            let sector = SECTORS.get(sector_c.selected() as usize).map(|s| s.code.to_string()).unwrap_or_default();
+            let band = BAND_CODES.get(band_c.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
             if sector.is_empty() || band.is_empty() {
                 return;
             }

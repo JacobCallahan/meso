@@ -11,7 +11,7 @@
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GBox, Button, CellRendererText, DrawingArea, Label, Orientation, Paned, PolicyType,
+    Box as GBox, Button, CellRendererText, DrawingArea, Label, Orientation, PolicyType,
     ScrolledWindow, SearchEntry, TreeModelFilter, TreeStore, TreeView, TreeViewColumn,
 };
 
@@ -65,7 +65,7 @@ pub fn build_national_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     } else {
         let p_clone = paned.clone();
         paned.connect_realize(move |_| {
-            let w = p_clone.allocated_width();
+            let w = p_clone.width();
             if w > 10 {
                 p_clone.set_position((w as f64 * 0.74) as i32);
             }
@@ -339,7 +339,6 @@ pub fn build_national_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         let state_r = Rc::clone(&state);
         let da_r = drawing_area.clone();
         let st_r = status.clone();
-        let refresh_btn_c = refresh_btn.clone();
 
         refresh_btn.connect_clicked(move |btn| {
             let product_id = state_r.borrow().current_product_id.clone();

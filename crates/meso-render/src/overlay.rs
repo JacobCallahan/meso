@@ -6,7 +6,6 @@
  */
 
 use meso_data::alerts::Warning;
-use meso_data::geo::latlon::LatLon;
 use meso_data::storm_tracks::StormCell;
 
 // ── Warning color mapping ─────────────────────────────────────────────────────
