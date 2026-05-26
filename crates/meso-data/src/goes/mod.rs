@@ -371,7 +371,17 @@ pub static BAND_LABELS: &[&str] = &[
 // ── URL builders ──────────────────────────────────────────────────────────────
 
 const CDN_BASE: &str = "https://cdn.star.nesdis.noaa.gov";
-const ANIM_BASE: &str = "https://www.star.nesdis.noaa.gov";
+
+/// Returns the image size suffix used for animation frames.
+/// Sectors with a fixed `image_size` use it directly; "latest" sectors
+/// (regional mesoscale views) default to 600×600.
+fn animation_size(sec: &Sector) -> &'static str {
+    if sec.image_size == "latest" {
+        "600x600"
+    } else {
+        sec.image_size
+    }
+}
 
 /// Return the lookup `Sector` for the given code, if any.
 pub fn find_sector(code: &str) -> Option<&'static Sector> {
@@ -422,7 +432,12 @@ pub fn image_url(sector_code: &str, band: &str) -> String {
     )
 }
 
-/// Fetch the list of animation frame URLs for a sector/band from the NESDIS HTML page.
+/// Fetch the list of animation frame URLs for a sector/band.
+///
+/// Fetches the CDN directory listing for the given sector/band and extracts
+/// timestamped JPEG URLs matching the sector's display size.  This approach
+/// is more stable than scraping the NESDIS viewer page, which has changed
+/// layout several times.
 pub async fn animation_urls(
     client: &Client,
     sector_code: &str,
@@ -431,66 +446,63 @@ pub async fn animation_urls(
 ) -> Result<Vec<String>> {
     let sec = find_sector(sector_code);
     let satellite = sec.map(|s| s.satellite).unwrap_or(GoesSatellite::Goes19);
-    let sat_str = satellite.sat_code();
+    let size = sec.map(animation_size).unwrap_or("1250x750");
 
-    // GLM band maps to EXTENT3 in animation URL (matches wX behavior)
-    let band_param = if band == "GLM" { "EXTENT3" } else { band };
+    // GLM band maps to EXTENT3 (matches wX behavior)
+    let band_local = if band == "GLM" { "EXTENT3" } else { band };
+    let product = if band == "GLM" { "GLM" } else { "ABI" };
 
-    let base_url = match sector_code {
-        "FD" | "FD-G17" => format!(
-            "{ANIM_BASE}/GOES/fulldisk_band.php?sat={sat_str}&band={band_param}&length={frame_count}"
-        ),
-        "CONUS" | "CONUS-G17" => format!(
-            "{ANIM_BASE}/GOES/conus_band.php?sat={sat_str}&band={band_param}&length={frame_count}"
-        ),
-        sector => format!(
-            "{ANIM_BASE}/GOES/sector_band.php?sat={sat_str}&sector={sector}&band={band_param}&length={frame_count}"
-        ),
+    let sector_path = match sector_code {
+        "FD" | "FD-G17" => "FD".to_string(),
+        "CONUS" | "CONUS-G17" => "CONUS".to_string(),
+        other => format!("SECTOR/{other}"),
     };
+
+    let dir_url = format!(
+        "{CDN_BASE}/{}/{product}/{sector_path}/{band_local}/",
+        satellite.cdn_name()
+    );
 
     let html = client
-        .get(&base_url)
+        .get(&dir_url)
         .send()
         .await
-        .context("GOES animation request failed")?
+        .context("GOES CDN directory request failed")?
         .text()
         .await
-        .context("GOES animation response read failed")?;
+        .context("GOES CDN directory response read failed")?;
 
-    parse_animation_urls(&html, frame_count)
+    parse_cdn_animation_urls(&html, &dir_url, size, frame_count)
 }
 
-fn parse_animation_urls(html: &str, max_frames: usize) -> Result<Vec<String>> {
-    // The NESDIS page embeds a JS array: animationImages = ['https://cdn.star...jpg', ...];
-    // Extract the array contents first, then pull each quoted URL.
-    let compressed = html.replace("\r\n", " ").replace('\n', " ");
+fn parse_cdn_animation_urls(
+    html: &str,
+    dir_url: &str,
+    size: &str,
+    max_frames: usize,
+) -> Result<Vec<String>> {
+    // The CDN Apache directory listing contains lines like:
+    //   <a href="20261461751_GOES19-ABI-CONUS-02-1250x750.jpg">...</a>
+    // We match only timestamped files (leading digits) of the requested size.
+    let escaped_size = regex::escape(size);
+    let re = Regex::new(&format!(r#"href="(\d[^"]*-{escaped_size}\.jpg)""#)).unwrap();
 
-    let array_re = Regex::new(r"animationImages\s*=\s*\[(.*?)\]").unwrap();
-    let url_re = Regex::new(r"'(https[^']+\.jpg)'").unwrap();
-
-    let urls: Vec<String> = if let Some(cap) = array_re.captures(&compressed) {
-        let array_str = cap.get(1).map(|m| m.as_str()).unwrap_or("");
-        url_re
-            .captures_iter(array_str)
-            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-            .collect()
-    } else {
-        // Fallback: match any CDN .jpg in anchor hrefs (older page format)
-        let anchor_re =
-            Regex::new(r#"<a href="(https://cdn\.star\.nesdis\.noaa\.gov[^"]+\.jpg)">"#).unwrap();
-        anchor_re
-            .captures_iter(&compressed)
-            .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-            .collect()
-    };
+    let urls: Vec<String> = re
+        .captures_iter(html)
+        .filter_map(|c| c.get(1))
+        .map(|m| format!("{dir_url}{}", m.as_str()))
+        .collect();
 
     if urls.is_empty() {
         anyhow::bail!(
-            "No animation frames found in NESDIS page (got {} bytes of HTML)",
+            "No animation frames found for size {size} in CDN directory {dir_url} \
+             (got {} bytes of HTML)",
             html.len()
         );
     }
 
+    // Filenames encode timestamps as YYYYDDDHHNN…, so lexicographic order is
+    // chronological.  The directory listing is already sorted this way.
     let start = urls.len().saturating_sub(max_frames);
     Ok(urls[start..].to_vec())
 }

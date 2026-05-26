@@ -129,6 +129,6 @@ fn parse_cities(text: &str) -> Vec<City> {
         });
     }
     // Sort descending by population so we always draw largest cities first
-    cities.sort_by(|a, b| b.population.cmp(&a.population));
+    cities.sort_by_key(|b| std::cmp::Reverse(b.population));
     cities
 }

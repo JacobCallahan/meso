@@ -358,6 +358,7 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
         drawing_area.clone(),
         status.clone(),
         vec![refresh_btn.clone(), anim_btn.clone()],
+        true,
     );
 
     // Auto-refresh latest satellite image every 5 minutes when not animating
@@ -412,7 +413,7 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
                     }
                 }
                 let btns = vec![refresh_btn_sec.clone(), anim_btn_sec.clone()];
-                load_sat_image(Rc::clone(&state_c), da_c.clone(), st_c.clone(), btns);
+                load_sat_image(Rc::clone(&state_c), da_c.clone(), st_c.clone(), btns, true);
             }
         });
     }
@@ -458,7 +459,7 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
                     }
                 }
                 let btns = vec![refresh_btn_band.clone(), anim_btn_band.clone()];
-                load_sat_image(Rc::clone(&state_c), da_c.clone(), st_c.clone(), btns);
+                load_sat_image(Rc::clone(&state_c), da_c.clone(), st_c.clone(), btns, true);
             }
         });
     }
@@ -475,6 +476,7 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
                 da_r.clone(),
                 stat_r.clone(),
                 btns_r.clone(),
+                false,
             );
         });
     }
@@ -653,7 +655,13 @@ fn schedule_sat_auto_refresh(
 ) {
     glib::timeout_add_local(std::time::Duration::from_secs(300), move || {
         if !anim_running.get() {
-            load_sat_image(Rc::clone(&state), da.clone(), status.clone(), btns.clone());
+            load_sat_image(
+                Rc::clone(&state),
+                da.clone(),
+                status.clone(),
+                btns.clone(),
+                false,
+            );
         }
         glib::ControlFlow::Continue
     });
@@ -692,7 +700,13 @@ fn zoom_image_around(
 
 // ── Data loading ──────────────────────────────────────────────────────────────
 
-fn load_sat_image(state: Rc<RefCell<SatState>>, da: DrawingArea, status: Label, btns: Vec<Button>) {
+fn load_sat_image(
+    state: Rc<RefCell<SatState>>,
+    da: DrawingArea,
+    status: Label,
+    btns: Vec<Button>,
+    reset_view: bool,
+) {
     let sector = state.borrow().sector.clone();
     let band = state.borrow().band.clone();
     let url = goes::image_url(&sector, &band);
@@ -714,11 +728,21 @@ fn load_sat_image(state: Rc<RefCell<SatState>>, da: DrawingArea, status: Label, 
                 Ok(bytes) => match bytes_to_pixbuf(&bytes) {
                     Some(pb) => {
                         let mut st = state.borrow_mut();
+                        if reset_view {
+                            st.zoom = 1.0;
+                            st.pan_x = 0.0;
+                            st.pan_y = 0.0;
+                        } else if let Some(old_pb) = &st.current_pixbuf {
+                            // Rescale pan proportionally if image dimensions changed.
+                            let (ow, oh) = (old_pb.width() as f64, old_pb.height() as f64);
+                            let (nw, nh) = (pb.width() as f64, pb.height() as f64);
+                            if ow != nw || oh != nh {
+                                st.pan_x *= nw / ow;
+                                st.pan_y *= nh / oh;
+                            }
+                        }
                         st.current_pixbuf = Some(pb);
                         st.anim_frames.clear();
-                        st.zoom = 1.0;
-                        st.pan_x = 0.0;
-                        st.pan_y = 0.0;
                         drop(st);
                         da.queue_draw();
                         status.set_text("Ready");
@@ -854,6 +878,18 @@ fn fetch_sat_animation(
                     let span = sat_time_span_str(&timestamps);
                     {
                         let mut st = state.borrow_mut();
+                        // Rescale pan if animation frames have different dimensions
+                        // than the current static image, so the same geographic area
+                        // stays centered (pan is in image-pixel space).
+                        if let (Some(old_pb), Some(new_pb)) = (&st.current_pixbuf, pixbufs.first())
+                        {
+                            let (ow, oh) = (old_pb.width() as f64, old_pb.height() as f64);
+                            let (nw, nh) = (new_pb.width() as f64, new_pb.height() as f64);
+                            if ow != nw || oh != nh {
+                                st.pan_x *= nw / ow;
+                                st.pan_y *= nh / oh;
+                            }
+                        }
                         st.anim_frames = pixbufs;
                         st.anim_timestamps = timestamps;
                         st.anim_index = 0;

@@ -60,6 +60,18 @@ impl Cache {
         let _ = std::fs::write(&ttl_path, expiry.to_string());
     }
 
+    /// Returns true if a non-expired entry exists for `key`, without reading the data.
+    pub fn contains(&self, key: &str) -> bool {
+        let hash = hash_key(key);
+        let ttl_path = self.dir.join(format!("{hash}.ttl"));
+        if let Ok(ttl_str) = std::fs::read_to_string(&ttl_path) {
+            let expiry: u64 = ttl_str.trim().parse().unwrap_or(0);
+            unix_now() <= expiry
+        } else {
+            false
+        }
+    }
+
     /// Remove a specific cache entry.
     pub fn invalidate(&self, key: &str) {
         let hash = hash_key(key);
