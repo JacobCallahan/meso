@@ -60,16 +60,33 @@ impl Cache {
         let _ = std::fs::write(&ttl_path, expiry.to_string());
     }
 
-    /// Returns true if a non-expired entry exists for `key`, without reading the data.
+    /// Returns true if a non-expired, readable entry exists for `key`
+    /// without reading the data bytes.
+    ///
+    /// Mirrors `get()`'s cleanup: removes both files if the TTL has expired
+    /// or if the data file is missing (orphaned sidecar).
     pub fn contains(&self, key: &str) -> bool {
         let hash = hash_key(key);
+        let data_path = self.dir.join(&hash);
         let ttl_path = self.dir.join(format!("{hash}.ttl"));
-        if let Ok(ttl_str) = std::fs::read_to_string(&ttl_path) {
-            let expiry: u64 = ttl_str.trim().parse().unwrap_or(0);
-            unix_now() <= expiry
-        } else {
-            false
+
+        let Ok(ttl_str) = std::fs::read_to_string(&ttl_path) else {
+            return false;
+        };
+
+        let expiry: u64 = ttl_str.trim().parse().unwrap_or(0);
+        if unix_now() > expiry {
+            let _ = std::fs::remove_file(&data_path);
+            let _ = std::fs::remove_file(&ttl_path);
+            return false;
         }
+
+        if !data_path.exists() {
+            let _ = std::fs::remove_file(&ttl_path);
+            return false;
+        }
+
+        true
     }
 
     /// Remove a specific cache entry.
