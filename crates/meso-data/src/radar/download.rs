@@ -81,8 +81,9 @@ impl RadarDownloader {
 
     /// Build the NOMADS directory URL for Level 2 files.
     pub fn level2_dir_url(site: &str) -> String {
-        let prefix = rid_prefix(site).to_uppercase();
-        format!("{}{}{}/", NOMADS_L2_BASE, prefix, site.to_uppercase())
+        // Site codes are always 4-letter (e.g. KTLX); the prefix letter is
+        // already embedded, so we just use the site code directly.
+        format!("{}{}/", NOMADS_L2_BASE, site.to_uppercase())
     }
 
     /// Parse NOMADS Level 2 `dir.list` lines into ordered (filename, size) entries.
@@ -417,9 +418,12 @@ mod tests {
     #[test]
     fn level2_dir_url_is_uppercase_with_prefix() {
         let url = RadarDownloader::level2_dir_url("KTLX");
+        // NOMADS uses the 4-letter site code directly (no extra prefix).
         assert!(url.contains("KTLX"));
-        // Prefix is the first char uppercased ("K" for most CONUS sites).
-        assert!(url.contains("KKTLX") || url.contains("KTLX"));
+        assert!(
+            !url.contains("KKTLX"),
+            "URL must not double the prefix: {url}"
+        );
         assert!(url.ends_with('/'));
     }
 
