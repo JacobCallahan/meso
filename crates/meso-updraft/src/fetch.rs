@@ -13,6 +13,7 @@ use anyhow::Result;
 use reqwest::Client;
 use tracing::{info, warn};
 
+use meso_data::cache::Cache;
 use meso_data::goes;
 use meso_data::radar::{download::RadarDownloader, products::RadarProduct};
 use meso_data::updraft::{RadarSubscription, SatSubscription};
@@ -27,19 +28,25 @@ pub async fn fetch_radar(
     let dl = RadarDownloader::new(client.clone());
 
     if product.is_level2() {
+        let dcache = Cache::new("radar/l2-decomp");
         let base = RadarDownloader::level2_dir_url(&sub.station);
         let fnames = dl
             .level2_filenames_for_animation(&sub.station, frame_count)
             .await?;
-        let mut cached = 0usize;
+        let mut fetched = 0usize;
+        let mut skipped = 0usize;
         for fname in &fnames {
             let url = format!("{base}{fname}");
+            if dcache.contains(&url) {
+                skipped += 1;
+                continue;
+            }
             match dl
                 .fetch_level2_decompressed(&sub.station, &product, &url)
                 .await
             {
                 Ok(bytes) => {
-                    cached += 1;
+                    fetched += 1;
                     info!(
                         "updraft: cached L2 frame {}/{} {} ({} bytes)",
                         sub.station,
@@ -55,25 +62,32 @@ pub async fn fetch_radar(
             }
         }
         info!(
-            "updraft: L2 {}/{} — {}/{} frames cached",
+            "updraft: L2 {}/{} — {}/{} new frames fetched, {} already cached",
             sub.station,
             sub.product,
-            cached,
-            fnames.len()
+            fetched,
+            fnames.len(),
+            skipped,
         );
     } else {
+        let acache = Cache::new("radar/anim");
         let fnames = dl
             .level3_filenames_for_animation(&sub.station, &product, frame_count)
             .await?;
-        let mut cached = 0usize;
+        let mut fetched = 0usize;
+        let mut skipped = 0usize;
         for fname in &fnames {
             let url = match RadarDownloader::level3_file_url(&sub.station, &product, fname) {
                 Some(u) => u,
                 None => continue,
             };
+            if acache.contains(&url) {
+                skipped += 1;
+                continue;
+            }
             match dl.fetch_bytes(&url).await {
                 Ok(bytes) => {
-                    cached += 1;
+                    fetched += 1;
                     info!(
                         "updraft: cached L3 frame {}/{} {} ({} bytes)",
                         sub.station,
@@ -89,11 +103,12 @@ pub async fn fetch_radar(
             }
         }
         info!(
-            "updraft: L3 {}/{} — {}/{} frames cached",
+            "updraft: L3 {}/{} — {}/{} new frames fetched, {} already cached",
             sub.station,
             sub.product,
-            cached,
-            fnames.len()
+            fetched,
+            fnames.len(),
+            skipped,
         );
     }
     Ok(())
@@ -106,11 +121,17 @@ pub async fn fetch_satellite(
 ) -> Result<()> {
     let urls = goes::animation_urls(client, &sub.sector, &sub.band, frame_count).await?;
     let total = urls.len();
-    let mut cached = 0usize;
+    let gcache = Cache::new("goes");
+    let mut fetched = 0usize;
+    let mut skipped = 0usize;
     for url in &urls {
+        if gcache.contains(url) {
+            skipped += 1;
+            continue;
+        }
         match goes::fetch_image(client, url).await {
             Ok(bytes) => {
-                cached += 1;
+                fetched += 1;
                 info!(
                     "updraft: cached satellite {}/{} frame ({} bytes)",
                     sub.sector,
@@ -125,8 +146,8 @@ pub async fn fetch_satellite(
         }
     }
     info!(
-        "updraft: satellite {}/{} — {}/{} frames cached",
-        sub.sector, sub.band, cached, total
+        "updraft: satellite {}/{} — {}/{} new frames fetched, {} already cached",
+        sub.sector, sub.band, fetched, total, skipped
     );
     Ok(())
 }

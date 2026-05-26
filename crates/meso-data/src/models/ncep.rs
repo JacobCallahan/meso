@@ -6,7 +6,7 @@
  * Base URL: https://mag.ncep.noaa.gov
  * Image URL patterns:
  *   GFS:  /data/gfs/{run}/{sector}/{param}/gfs_{sector}_{fhr}_{param}.gif
- *   HRRR: /data/hrrr/{run}/hrrr_{sector}_{fhr}_{param}.gif
+ *   HRRR: /data/hrrr/{run}/hrrr_{sector}_{fhr*100:05}_{param}.gif  (5-digit FHR * 100)
  *   NAM/RAP: /data/{model}/{run}/{model}_{sector}_{fhr}_{param}.gif
  *
  * Run time is determined by querying the MAG web page for the latest cycle.
@@ -384,7 +384,7 @@ pub fn frame_url(model: &NcepModel, run: &str, sector: &str, param: &str, fhr: u
             format!("{MAG_BASE}/data/{m}/{run_token}/{sec}/{param}/{m}_{sec}_{fhr_str}_{param}.gif")
         }
         NcepModel::Hrrr => {
-            let fhr_str = format!("{fhr:03}");
+            let fhr_str = format!("{:05}", u32::from(fhr) * 100);
             format!("{MAG_BASE}/data/{m}/{run_token}/{m}_{sec}_{fhr_str}_{param}.gif")
         }
         _ => {

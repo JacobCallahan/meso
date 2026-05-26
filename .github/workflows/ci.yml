@@ -45,10 +45,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install GTK4 / libadwaita system dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev \
+            libadwaita-1-dev
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (meso-data, meso-render)
         # meso-app requires a display server; unit tests live in the data and
-        # render crates which have no GTK dependency.
+        # render crates. meso-render depends on cairo-rs which needs glib/cairo
+        # system headers, so GTK4 dev packages are required even here.
         run: cargo test -p meso-data -p meso-render
 
   integration:

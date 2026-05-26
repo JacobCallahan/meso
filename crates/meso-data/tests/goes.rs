@@ -58,7 +58,7 @@ fn nearest_sector_for_okc_is_non_empty() {
 /// Fetch GOES animation URLs for CONUS/Band-2 and verify at least one URL is
 /// returned with the expected CDN hostname.
 #[tokio::test]
-#[ignore = "requires network access to www.star.nesdis.noaa.gov"]
+#[ignore = "requires network access to cdn.star.nesdis.noaa.gov"]
 async fn goes_conus_animation_urls_non_empty() {
     let client = wx_client();
     let urls = goes::animation_urls(&client, "CONUS", "02", 6)
