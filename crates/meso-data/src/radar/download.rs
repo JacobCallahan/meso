@@ -81,9 +81,19 @@ impl RadarDownloader {
 
     /// Build the NOMADS directory URL for Level 2 files.
     pub fn level2_dir_url(site: &str) -> String {
-        // Site codes are always 4-letter (e.g. KTLX); the prefix letter is
-        // already embedded, so we just use the site code directly.
-        format!("{}{}/", NOMADS_L2_BASE, site.to_uppercase())
+        // NOMADS uses 4-letter uppercase codes (KTLX, KRAX, PHKI, TJUA…).
+        // Internal site codes may be 3-letter (e.g. RAX) or already 4-letter
+        // (e.g. KTLX). Only expand when the code is shorter than 4 chars.
+        let code = if site.len() >= 4 {
+            site.to_uppercase()
+        } else {
+            format!(
+                "{}{}",
+                crate::geo::sites::rid_prefix(site).to_uppercase(),
+                site.to_uppercase()
+            )
+        };
+        format!("{}{}/", NOMADS_L2_BASE, code)
     }
 
     /// Parse NOMADS Level 2 `dir.list` lines into ordered (filename, size) entries.
@@ -417,14 +427,22 @@ mod tests {
 
     #[test]
     fn level2_dir_url_is_uppercase_with_prefix() {
+        // 4-letter codes are already complete — no prefix should be added.
         let url = RadarDownloader::level2_dir_url("KTLX");
-        // NOMADS uses the 4-letter site code directly (no extra prefix).
         assert!(url.contains("KTLX"));
         assert!(
             !url.contains("KKTLX"),
             "URL must not double the prefix: {url}"
         );
         assert!(url.ends_with('/'));
+
+        // 3-letter codes need the prefix letter prepended (RAX → KRAX).
+        let url3 = RadarDownloader::level2_dir_url("RAX");
+        assert!(
+            url3.contains("KRAX"),
+            "3-letter site code should be expanded: {url3}"
+        );
+        assert!(url3.ends_with('/'));
     }
 
     #[test]
