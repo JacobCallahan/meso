@@ -1,6 +1,6 @@
 # Meso
 
-![Meso logo](media/logo.png)
+![Meso logo](media/meso_logo_small.png)
 
 A professional-grade desktop weather application for Fedora Linux, written in Rust.
 Inspired by the [wX Android app](https://gitlab.com/joshua.tee/wx/), targeting weather
