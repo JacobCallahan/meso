@@ -2849,10 +2849,8 @@ fn lookup_l3_gate(st: &RadarPaneState, range_km: f64, az: f64) -> Option<(String
     // Try current cached L3 first; fall back to first animation frame
     let data = if let Some(ref l3) = st.cached_l3 {
         l3
-    } else if let Some(first) = st.anim_l3_frames.first() {
-        first
     } else {
-        return None;
+        st.anim_l3_frames.first()?
     };
 
     let raw = if data.is_raster {
