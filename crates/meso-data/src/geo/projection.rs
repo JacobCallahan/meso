@@ -40,3 +40,72 @@ pub fn latlon_to_gl(point: &LatLon, center: &LatLon, scale: f32) -> (f32, f32) {
     let y = (point.lat - center.lat) as f32 * scale;
     (x, y)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geo::latlon::LatLon;
+
+    const CENTER: LatLon = LatLon {
+        lat: 35.0,
+        lon: -97.0,
+    };
+
+    #[test]
+    fn latlon_to_screen_center_maps_to_image_center() {
+        let (x, y) = latlon_to_screen(&CENTER, &CENTER, 500.0, 500.0, 100.0);
+        assert!((x - 500.0).abs() < 0.001, "x={x}");
+        assert!((y - 500.0).abs() < 0.001, "y={y}");
+    }
+
+    #[test]
+    fn latlon_to_screen_point_north_has_smaller_y() {
+        let north = LatLon::new(CENTER.lat + 1.0, CENTER.lon);
+        let (_, y) = latlon_to_screen(&north, &CENTER, 500.0, 500.0, 100.0);
+        // Screen y increases downward; north → smaller y value.
+        assert!(
+            y < 500.0,
+            "point north of center should have y < 500.0, got {y}"
+        );
+    }
+
+    #[test]
+    fn latlon_to_screen_point_east_has_larger_x() {
+        let east = LatLon::new(CENTER.lat, CENTER.lon + 1.0);
+        let (x, _) = latlon_to_screen(&east, &CENTER, 500.0, 500.0, 100.0);
+        assert!(
+            x > 500.0,
+            "point east of center should have x > 500.0, got {x}"
+        );
+    }
+
+    #[test]
+    fn compute_scale_pixels_per_degree() {
+        // 1000 px canvas / 10° zoom = 100 px per degree.
+        let scale = compute_scale(1000.0, 10.0);
+        assert!((scale - 100.0).abs() < 0.001, "scale={scale}");
+    }
+
+    #[test]
+    fn compute_scale_zoomed_in_gives_larger_value() {
+        let wide = compute_scale(1000.0, 20.0);
+        let narrow = compute_scale(1000.0, 4.0);
+        assert!(narrow > wide, "smaller zoom window → larger px/degree");
+    }
+
+    #[test]
+    fn latlon_to_gl_center_is_origin() {
+        let (x, y) = latlon_to_gl(&CENTER, &CENTER, 100.0);
+        assert!(x.abs() < 0.001 && y.abs() < 0.001);
+    }
+
+    #[test]
+    fn latlon_to_gl_north_positive_y() {
+        let north = LatLon::new(CENTER.lat + 1.0, CENTER.lon);
+        let (_, y) = latlon_to_gl(&north, &CENTER, 100.0);
+        assert!(
+            y > 0.0,
+            "north of center should have positive y in GL space"
+        );
+    }
+}

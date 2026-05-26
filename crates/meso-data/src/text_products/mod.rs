@@ -5,10 +5,10 @@
  * ZFP (Zone Forecast Product), and LSR (Local Storm Report).
  */
 
+use crate::geo::sites;
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::Deserialize;
-use crate::geo::sites;
 
 // ── Product types ─────────────────────────────────────────────────────────────
 

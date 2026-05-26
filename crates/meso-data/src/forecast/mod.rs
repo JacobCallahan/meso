@@ -259,7 +259,7 @@ impl HourlyPeriod {
                     "Dec",
                 ];
                 if let (Ok(m), Ok(d)) = (parts[1].parse::<usize>(), parts[2].parse::<u32>()) {
-                    if m >= 1 && m <= 12 {
+                    if (1..=12).contains(&m) {
                         return format!("{} {}", month_names[m - 1], d);
                     }
                 }

@@ -30,7 +30,7 @@ impl Viewport {
     /// Create a default viewport centered on the given site.
     pub fn new(center: LatLon, width: u32, height: u32) -> Self {
         Viewport {
-            site_origin: center.clone(),
+            site_origin: center,
             center,
             zoom: 1.0,
             width,
@@ -112,6 +112,6 @@ impl Viewport {
         let dlon = -dx / ppkm / (6371.0 * lat_rad.cos());
         let dlat = dy / ppkm / 6371.0;
         self.center.lat = (self.center.lat + dlat.to_degrees()).clamp(-85.0, 85.0);
-        self.center.lon = self.center.lon + dlon.to_degrees();
+        self.center.lon += dlon.to_degrees();
     }
 }

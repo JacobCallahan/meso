@@ -13,10 +13,7 @@ use reqwest::Client;
 use tracing::{info, warn};
 
 use meso_data::goes;
-use meso_data::radar::{
-    download::RadarDownloader,
-    products::RadarProduct,
-};
+use meso_data::radar::{download::RadarDownloader, products::RadarProduct};
 use meso_data::updraft::{RadarSubscription, SatSubscription};
 
 pub async fn fetch_radar(client: &Client, sub: &RadarSubscription) -> Result<()> {
@@ -67,12 +64,18 @@ pub async fn run_fetch_cycle(
 ) {
     for sub in radar_subs {
         if let Err(e) = fetch_radar(client, sub).await {
-            warn!("updraft: radar fetch failed for {}/{}: {e}", sub.station, sub.product);
+            warn!(
+                "updraft: radar fetch failed for {}/{}: {e}",
+                sub.station, sub.product
+            );
         }
     }
     for sub in sat_subs {
         if let Err(e) = fetch_satellite(client, sub).await {
-            warn!("updraft: satellite fetch failed for {}/{}: {e}", sub.sector, sub.band);
+            warn!(
+                "updraft: satellite fetch failed for {}/{}: {e}",
+                sub.sector, sub.band
+            );
         }
     }
 }

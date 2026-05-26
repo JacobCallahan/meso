@@ -89,7 +89,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ## Building
 
 ```bash
-git clone <repo-url> meso
+git clone https://github.com/JacobCallahan/meso
 cd meso
 cargo build --release
 ```

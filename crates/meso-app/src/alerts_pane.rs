@@ -106,10 +106,8 @@ pub fn build_alerts_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         .iter()
         .map(|(code, label)| format!("{code} — {label}"))
         .collect();
-    let area_ids: Rc<Vec<&'static str>> =
-        Rc::new(AREAS.iter().map(|(code, _)| *code).collect());
-    let area_model =
-        StringList::new(&area_displays.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let area_ids: Rc<Vec<&'static str>> = Rc::new(AREAS.iter().map(|(code, _)| *code).collect());
+    let area_model = StringList::new(&area_displays.iter().map(|s| s.as_str()).collect::<Vec<_>>());
     let area_combo = DropDown::new(Some(area_model), gtk4::Expression::NONE);
 
     // Default to config location state

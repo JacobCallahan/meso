@@ -102,7 +102,10 @@ async fn main() -> Result<()> {
         let cfg = load_daemon_config();
 
         if !cfg.updraft_enabled {
-            info!("updraft disabled in config; sleeping {} s", cfg.updraft_interval_secs);
+            info!(
+                "updraft disabled in config; sleeping {} s",
+                cfg.updraft_interval_secs
+            );
             tokio::time::sleep(Duration::from_secs(cfg.updraft_interval_secs)).await;
             continue;
         }
@@ -119,13 +122,13 @@ async fn main() -> Result<()> {
         fetch::run_fetch_cycle(&client, &subs.radar, &subs.satellite).await;
 
         // Purge stale cache entries based on configured retention
-        let max_age = Duration::from_secs(
-            cfg.cache_radar_hours
-                .max(cfg.cache_sat_hours) as u64
-                * 3600,
-        );
+        let max_age =
+            Duration::from_secs(cfg.cache_radar_hours.max(cfg.cache_sat_hours) as u64 * 3600);
         Cache::purge_old_global(max_age);
-        info!("updraft: cache purge complete (max_age={}h)", max_age.as_secs() / 3600);
+        info!(
+            "updraft: cache purge complete (max_age={}h)",
+            max_age.as_secs() / 3600
+        );
 
         tokio::time::sleep(Duration::from_secs(cfg.updraft_interval_secs)).await;
     }

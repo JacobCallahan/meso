@@ -14,8 +14,8 @@
  */
 
 use anyhow::{bail, Context, Result};
-use reqwest::Client;
 use reqwest::header::CONTENT_TYPE;
+use reqwest::Client;
 use std::time::Duration;
 
 use crate::cache::Cache;
@@ -45,52 +45,74 @@ macro_rules! prods {
 // ── GFS products ──────────────────────────────────────────────────────────────
 
 static GFS_PRECIP: &[NcepProduct] = prods![
-    ("precip_p01",      "Precip (1hr)"),
-    ("precip_p03",      "Precip (3hr)"),
-    ("precip_p06",      "Precip (6hr)"),
-    ("precip_p12",      "Precip (12hr)"),
-    ("precip_p24",      "Precip (24hr)"),
-    ("precip_ptot",     "Total Accumulated Precip"),
-    ("precip_rate_type","Precip Rate / 1000-500mb Thickness"),
-    ("sim_radar_comp",  "Composite Simulated Radar"),
-    ("snodpth_chng",    "Snow Depth Change from F00"),
+    ("precip_p01", "Precip (1hr)"),
+    ("precip_p03", "Precip (3hr)"),
+    ("precip_p06", "Precip (6hr)"),
+    ("precip_p12", "Precip (12hr)"),
+    ("precip_p24", "Precip (24hr)"),
+    ("precip_ptot", "Total Accumulated Precip"),
+    ("precip_rate_type", "Precip Rate / 1000-500mb Thickness"),
+    ("sim_radar_comp", "Composite Simulated Radar"),
+    ("snodpth_chng", "Snow Depth Change from F00"),
 ];
 
 static GFS_SURFACE: &[NcepProduct] = prods![
-    ("10m_wnd_2m_temp",       "MSLP / 10m Wind / 2m Temp"),
-    ("10m_wnd_precip",        "MSLP / 10m Wind / Precip"),
-    ("850_temp_mslp_precip",  "MSLP / 850mb Temp / Precip"),
-    ("1000_500_thick",        "MSLP / 1000-500mb Thickness"),
-    ("1000_850_thick",        "MSLP / 1000-850mb Thickness"),
-    ("850_700_thick",         "MSLP / 850-700mb Thickness"),
+    ("10m_wnd_2m_temp", "MSLP / 10m Wind / 2m Temp"),
+    ("10m_wnd_precip", "MSLP / 10m Wind / Precip"),
+    ("850_temp_mslp_precip", "MSLP / 850mb Temp / Precip"),
+    ("1000_500_thick", "MSLP / 1000-500mb Thickness"),
+    ("1000_850_thick", "MSLP / 1000-850mb Thickness"),
+    ("850_700_thick", "MSLP / 850-700mb Thickness"),
 ];
 
 static GFS_UPPER_AIR: &[NcepProduct] = prods![
-    ("200_wnd_ht",   "200mb Wind and Height"),
-    ("250_wnd_ht",   "250mb Wind and Height"),
-    ("300_wnd_ht",   "300mb Wind and Height"),
-    ("500_vort_ht",  "500mb Vorticity, Wind and Height"),
-    ("500_wnd_ht",   "500mb Wind and Height"),
-    ("500_rh_ht",    "500mb RH and Height"),
-    ("700_rh_ht",    "700mb RH, Height and Omega"),
-    ("850_temp_ht",  "850mb Temp, Wind and Height"),
-    ("850_rh_ht",    "850mb RH and Height"),
-    ("850_pw_ht",    "850mb Height / PW / Wind"),
-    ("850_vort_ht",  "850mb Vorticity, Wind and Height"),
-    ("850vor_500ht_200wd", "850mb Vort / 500mb Height / 200mb Wind"),
-    ("925_temp_ht",  "925mb Temp, Wind and Height"),
+    ("200_wnd_ht", "200mb Wind and Height"),
+    ("250_wnd_ht", "250mb Wind and Height"),
+    ("300_wnd_ht", "300mb Wind and Height"),
+    ("500_vort_ht", "500mb Vorticity, Wind and Height"),
+    ("500_wnd_ht", "500mb Wind and Height"),
+    ("500_rh_ht", "500mb RH and Height"),
+    ("700_rh_ht", "700mb RH, Height and Omega"),
+    ("850_temp_ht", "850mb Temp, Wind and Height"),
+    ("850_rh_ht", "850mb RH and Height"),
+    ("850_pw_ht", "850mb Height / PW / Wind"),
+    ("850_vort_ht", "850mb Vorticity, Wind and Height"),
+    (
+        "850vor_500ht_200wd",
+        "850mb Vort / 500mb Height / 200mb Wind"
+    ),
+    ("925_temp_ht", "925mb Temp, Wind and Height"),
 ];
 
 pub static GFS_CATEGORIES: &[NcepProductCategory] = &[
-    NcepProductCategory { name: "GFS Precipitation", products: GFS_PRECIP },
-    NcepProductCategory { name: "GFS Surface",       products: GFS_SURFACE },
-    NcepProductCategory { name: "GFS Upper Air",     products: GFS_UPPER_AIR },
+    NcepProductCategory {
+        name: "GFS Precipitation",
+        products: GFS_PRECIP,
+    },
+    NcepProductCategory {
+        name: "GFS Surface",
+        products: GFS_SURFACE,
+    },
+    NcepProductCategory {
+        name: "GFS Upper Air",
+        products: GFS_UPPER_AIR,
+    },
 ];
 
 pub static GFS_SECTORS: &[&str] = &[
-    "CONUS", "NAMER", "ALASKA", "SAMER", "AFRICA",
-    "NORTH-PAC", "EAST-PAC", "WEST-ATL", "ATLANTIC",
-    "POLAR", "EUROPE", "ASIA", "SOUTH-PAC",
+    "CONUS",
+    "NAMER",
+    "ALASKA",
+    "SAMER",
+    "AFRICA",
+    "NORTH-PAC",
+    "EAST-PAC",
+    "WEST-ATL",
+    "ATLANTIC",
+    "POLAR",
+    "EUROPE",
+    "ASIA",
+    "SOUTH-PAC",
 ];
 
 // GFS forecast hours: 0-240 every 3hr, then every 12hr to 384
@@ -104,43 +126,52 @@ pub fn gfs_hours() -> Vec<u16> {
 // ── NAM products ──────────────────────────────────────────────────────────────
 
 static NAM_PRECIP: &[NcepProduct] = prods![
-    ("precip_p01",      "Precip (1hr)"),
-    ("precip_p03",      "Precip (3hr)"),
-    ("precip_p06",      "Precip (6hr)"),
-    ("precip_ptot",     "Total Accumulated Precip"),
-    ("precip_rate_type","Precip Rate / 1000-500mb Thickness"),
-    ("sim_radar_1km",   "Simulated Radar 1km"),
-    ("snodpth_chng",    "Snow Depth Change from F00"),
+    ("precip_p01", "Precip (1hr)"),
+    ("precip_p03", "Precip (3hr)"),
+    ("precip_p06", "Precip (6hr)"),
+    ("precip_ptot", "Total Accumulated Precip"),
+    ("precip_rate_type", "Precip Rate / 1000-500mb Thickness"),
+    ("sim_radar_1km", "Simulated Radar 1km"),
+    ("snodpth_chng", "Snow Depth Change from F00"),
 ];
 
 static NAM_SURFACE: &[NcepProduct] = prods![
-    ("10m_wnd_2m_temp",       "MSLP / 10m Wind / 2m Temp"),
-    ("10m_wnd_precip",        "MSLP / 10m Wind / Precip"),
-    ("850_temp_mslp_precip",  "MSLP / 850mb Temp / Precip"),
-    ("1000_500_thick",        "MSLP / 1000-500mb Thickness"),
-    ("1000_850_thick",        "MSLP / 1000-850mb Thickness"),
-    ("850_700_thick",         "MSLP / 850-700mb Thickness"),
+    ("10m_wnd_2m_temp", "MSLP / 10m Wind / 2m Temp"),
+    ("10m_wnd_precip", "MSLP / 10m Wind / Precip"),
+    ("850_temp_mslp_precip", "MSLP / 850mb Temp / Precip"),
+    ("1000_500_thick", "MSLP / 1000-500mb Thickness"),
+    ("1000_850_thick", "MSLP / 1000-850mb Thickness"),
+    ("850_700_thick", "MSLP / 850-700mb Thickness"),
 ];
 
 static NAM_UPPER_AIR: &[NcepProduct] = prods![
-    ("200_wnd_ht",   "200mb Wind and Height"),
-    ("250_wnd_ht",   "250mb Wind and Height"),
-    ("300_wnd_ht",   "300mb Wind and Height"),
-    ("500_vort_ht",  "500mb Vorticity, Wind and Height"),
-    ("500_wnd_ht",   "500mb Wind and Height"),
-    ("500_rh_ht",    "500mb RH and Height"),
-    ("700_rh_ht",    "700mb RH, Height and Omega"),
-    ("850_temp_ht",  "850mb Temp, Wind and Height"),
-    ("850_rh_ht",    "850mb RH and Height"),
-    ("850_pw_ht",    "850mb Height / PW / Wind"),
-    ("850_vort_ht",  "850mb Vorticity, Wind and Height"),
-    ("925_temp_ht",  "925mb Temp, Wind and Height"),
+    ("200_wnd_ht", "200mb Wind and Height"),
+    ("250_wnd_ht", "250mb Wind and Height"),
+    ("300_wnd_ht", "300mb Wind and Height"),
+    ("500_vort_ht", "500mb Vorticity, Wind and Height"),
+    ("500_wnd_ht", "500mb Wind and Height"),
+    ("500_rh_ht", "500mb RH and Height"),
+    ("700_rh_ht", "700mb RH, Height and Omega"),
+    ("850_temp_ht", "850mb Temp, Wind and Height"),
+    ("850_rh_ht", "850mb RH and Height"),
+    ("850_pw_ht", "850mb Height / PW / Wind"),
+    ("850_vort_ht", "850mb Vorticity, Wind and Height"),
+    ("925_temp_ht", "925mb Temp, Wind and Height"),
 ];
 
 pub static NAM_CATEGORIES: &[NcepProductCategory] = &[
-    NcepProductCategory { name: "NAM Precipitation", products: NAM_PRECIP },
-    NcepProductCategory { name: "NAM Surface",       products: NAM_SURFACE },
-    NcepProductCategory { name: "NAM Upper Air",     products: NAM_UPPER_AIR },
+    NcepProductCategory {
+        name: "NAM Precipitation",
+        products: NAM_PRECIP,
+    },
+    NcepProductCategory {
+        name: "NAM Surface",
+        products: NAM_SURFACE,
+    },
+    NcepProductCategory {
+        name: "NAM Upper Air",
+        products: NAM_UPPER_AIR,
+    },
 ];
 
 pub static NAM_SECTORS: &[&str] = &["CONUS", "NAMER", "NORTH-PAC", "EAST-PAC", "WN-ATL"];
@@ -153,35 +184,36 @@ pub fn nam_hours() -> Vec<u16> {
 // ── RAP products ──────────────────────────────────────────────────────────────
 
 static RAP_PRODUCTS: &[NcepProduct] = prods![
-    ("precip_p01",      "Hourly Total Precip"),
-    ("precip_ptot",     "Total Accumulated Precip"),
-    ("precip_rate",     "Precipitation Rate"),
-    ("snow_total",      "Total Accumulated Snowfall"),
-    ("sim_radar_1km",   "Simulated Radar 1km"),
-    ("sim_radar_comp",  "Composite Simulated Radar"),
-    ("1000_500_thick",  "MSLP / 1000-500mb Thickness"),
-    ("1000_850_thick",  "MSLP / 1000-850mb Thickness"),
-    ("850_700_thick",   "MSLP / 850-700mb Thickness"),
-    ("cape_cin",        "CAPE / CIN"),
-    ("helicity",        "Helicity and 30m Wind"),
+    ("precip_p01", "Hourly Total Precip"),
+    ("precip_ptot", "Total Accumulated Precip"),
+    ("precip_rate", "Precipitation Rate"),
+    ("snow_total", "Total Accumulated Snowfall"),
+    ("sim_radar_1km", "Simulated Radar 1km"),
+    ("sim_radar_comp", "Composite Simulated Radar"),
+    ("1000_500_thick", "MSLP / 1000-500mb Thickness"),
+    ("1000_850_thick", "MSLP / 1000-850mb Thickness"),
+    ("850_700_thick", "MSLP / 850-700mb Thickness"),
+    ("cape_cin", "CAPE / CIN"),
+    ("helicity", "Helicity and 30m Wind"),
     ("2m_temp_10m_wnd", "2m Temp / 10m Wind"),
     ("2m_dewp_10m_wnd", "2m Dewpoint / 10m Wind"),
-    ("10m_wnd_sfc_gust","10m Wind Gust"),
-    ("echo_top",        "Echo Tops"),
-    ("vis",             "Visibility"),
-    ("200_wnd_ht",      "200mb Wind and Height"),
-    ("250_wnd_ht",      "250mb Wind and Height"),
-    ("300_wnd_ht",      "300mb Wind and Height"),
-    ("500_vort_ht",     "500mb Vorticity, Wind and Height"),
-    ("500_temp_ht",     "500mb Temp, Wind and Height"),
-    ("700_rh_ht",       "700mb RH, Wind, Height and Omega"),
-    ("850_temp_ht",     "850mb Temp, Wind and Height"),
-    ("925_temp_ht",     "925mb Temp, Wind and Height"),
+    ("10m_wnd_sfc_gust", "10m Wind Gust"),
+    ("echo_top", "Echo Tops"),
+    ("vis", "Visibility"),
+    ("200_wnd_ht", "200mb Wind and Height"),
+    ("250_wnd_ht", "250mb Wind and Height"),
+    ("300_wnd_ht", "300mb Wind and Height"),
+    ("500_vort_ht", "500mb Vorticity, Wind and Height"),
+    ("500_temp_ht", "500mb Temp, Wind and Height"),
+    ("700_rh_ht", "700mb RH, Wind, Height and Omega"),
+    ("850_temp_ht", "850mb Temp, Wind and Height"),
+    ("925_temp_ht", "925mb Temp, Wind and Height"),
 ];
 
-pub static RAP_CATEGORIES: &[NcepProductCategory] = &[
-    NcepProductCategory { name: "RAP Products", products: RAP_PRODUCTS },
-];
+pub static RAP_CATEGORIES: &[NcepProductCategory] = &[NcepProductCategory {
+    name: "RAP Products",
+    products: RAP_PRODUCTS,
+}];
 
 pub static RAP_SECTORS: &[&str] = &["CONUS", "NAMER"];
 
@@ -193,56 +225,68 @@ pub fn rap_hours() -> Vec<u16> {
 // ── HRRR products ─────────────────────────────────────────────────────────────
 
 static HRRR_PRECIP: &[NcepProduct] = prods![
-    ("precip_p01",      "Hourly Total Precip"),
-    ("precip_ptot",     "Total Accumulated Precip"),
-    ("precip_rate",     "Precipitation Rate"),
-    ("precip_rate_type","Precip Rate / 1000-500mb Thickness"),
-    ("snow_total",      "Total Accumulated Snowfall"),
-    ("sim_radar_1km",   "Simulated Radar 1km"),
-    ("sim_radar_comp",  "Composite Simulated Radar"),
-    ("sim_radar_max",   "Max Simulated Radar"),
+    ("precip_p01", "Hourly Total Precip"),
+    ("precip_ptot", "Total Accumulated Precip"),
+    ("precip_rate", "Precipitation Rate"),
+    ("precip_rate_type", "Precip Rate / 1000-500mb Thickness"),
+    ("snow_total", "Total Accumulated Snowfall"),
+    ("sim_radar_1km", "Simulated Radar 1km"),
+    ("sim_radar_comp", "Composite Simulated Radar"),
+    ("sim_radar_max", "Max Simulated Radar"),
 ];
 
 static HRRR_SEVERE: &[NcepProduct] = prods![
-    ("helicity_1km",         "0-1km Helicity / Storm Motion"),
-    ("helicity_3km",         "0-3km Helicity / Storm Motion"),
-    ("max_updraft_hlcy",     "Max 2-5km Updraft Helicity"),
-    ("accu_max_updraft_hlcy","Accumulated Max Updraft Helicity"),
-    ("sfc_cape_cin",         "SFC CAPE/CIN"),
-    ("best_cape_cin",        "Most Unstable CAPE/CIN"),
-    ("lightning",            "Lightning Flash Rate"),
+    ("helicity_1km", "0-1km Helicity / Storm Motion"),
+    ("helicity_3km", "0-3km Helicity / Storm Motion"),
+    ("max_updraft_hlcy", "Max 2-5km Updraft Helicity"),
+    ("accu_max_updraft_hlcy", "Accumulated Max Updraft Helicity"),
+    ("sfc_cape_cin", "SFC CAPE/CIN"),
+    ("best_cape_cin", "Most Unstable CAPE/CIN"),
+    ("lightning", "Lightning Flash Rate"),
 ];
 
 static HRRR_SURFACE: &[NcepProduct] = prods![
-    ("1000_500_thick",      "MSLP / 1000-500mb Thickness"),
-    ("1000_850_thick",      "MSLP / 1000-850mb Thickness"),
-    ("850_700_thick",       "MSLP / 850-700mb Thickness"),
-    ("850_temp_mslp_precip","MSLP / 850mb Temp / Precip"),
-    ("10m_wnd",             "10m Wind"),
-    ("10m_maxwnd",          "Max 10m Wind Speed"),
-    ("2m_temp_10m_wnd",     "2m Temp / 10m Wind"),
-    ("2m_dewp_10m_wnd",     "2m Dewpoint / 10m Wind"),
-    ("10m_wnd_sfc_gust",    "10m Wind Gust"),
-    ("echo_top",            "Echo Tops"),
-    ("ceiling",             "Cloud Ceiling"),
-    ("vis",                 "Visibility"),
+    ("1000_500_thick", "MSLP / 1000-500mb Thickness"),
+    ("1000_850_thick", "MSLP / 1000-850mb Thickness"),
+    ("850_700_thick", "MSLP / 850-700mb Thickness"),
+    ("850_temp_mslp_precip", "MSLP / 850mb Temp / Precip"),
+    ("10m_wnd", "10m Wind"),
+    ("10m_maxwnd", "Max 10m Wind Speed"),
+    ("2m_temp_10m_wnd", "2m Temp / 10m Wind"),
+    ("2m_dewp_10m_wnd", "2m Dewpoint / 10m Wind"),
+    ("10m_wnd_sfc_gust", "10m Wind Gust"),
+    ("echo_top", "Echo Tops"),
+    ("ceiling", "Cloud Ceiling"),
+    ("vis", "Visibility"),
 ];
 
 static HRRR_UPPER_AIR: &[NcepProduct] = prods![
-    ("250_wnd",     "250mb Wind"),
-    ("300_wnd",     "300mb Wind"),
+    ("250_wnd", "250mb Wind"),
+    ("300_wnd", "300mb Wind"),
     ("500_vort_ht", "500mb Vorticity, Wind and Height"),
     ("500_temp_ht", "500mb Temp, Wind and Height"),
-    ("700_rh_ht",   "700mb RH, Wind, Height and Omega"),
+    ("700_rh_ht", "700mb RH, Wind, Height and Omega"),
     ("850_temp_ht", "850mb Temp, Wind and Height"),
-    ("925_temp_wnd","925mb Temp and Wind"),
+    ("925_temp_wnd", "925mb Temp and Wind"),
 ];
 
 pub static HRRR_CATEGORIES: &[NcepProductCategory] = &[
-    NcepProductCategory { name: "HRRR Precipitation", products: HRRR_PRECIP },
-    NcepProductCategory { name: "HRRR Severe",        products: HRRR_SEVERE },
-    NcepProductCategory { name: "HRRR Surface",       products: HRRR_SURFACE },
-    NcepProductCategory { name: "HRRR Upper Air",     products: HRRR_UPPER_AIR },
+    NcepProductCategory {
+        name: "HRRR Precipitation",
+        products: HRRR_PRECIP,
+    },
+    NcepProductCategory {
+        name: "HRRR Severe",
+        products: HRRR_SEVERE,
+    },
+    NcepProductCategory {
+        name: "HRRR Surface",
+        products: HRRR_SURFACE,
+    },
+    NcepProductCategory {
+        name: "HRRR Upper Air",
+        products: HRRR_UPPER_AIR,
+    },
 ];
 
 pub static HRRR_SECTORS: &[&str] = &[
@@ -267,51 +311,56 @@ pub enum NcepModel {
 impl NcepModel {
     pub fn label(&self) -> &'static str {
         match self {
-            NcepModel::Gfs  => "GFS",
-            NcepModel::Nam  => "NAM",
-            NcepModel::Rap  => "RAP",
+            NcepModel::Gfs => "GFS",
+            NcepModel::Nam => "NAM",
+            NcepModel::Rap => "RAP",
             NcepModel::Hrrr => "HRRR",
         }
     }
 
     pub fn short(&self) -> &'static str {
         match self {
-            NcepModel::Gfs  => "gfs",
-            NcepModel::Nam  => "nam",
-            NcepModel::Rap  => "rap",
+            NcepModel::Gfs => "gfs",
+            NcepModel::Nam => "nam",
+            NcepModel::Rap => "rap",
             NcepModel::Hrrr => "hrrr",
         }
     }
 
     pub fn categories(&self) -> &'static [NcepProductCategory] {
         match self {
-            NcepModel::Gfs  => GFS_CATEGORIES,
-            NcepModel::Nam  => NAM_CATEGORIES,
-            NcepModel::Rap  => RAP_CATEGORIES,
+            NcepModel::Gfs => GFS_CATEGORIES,
+            NcepModel::Nam => NAM_CATEGORIES,
+            NcepModel::Rap => RAP_CATEGORIES,
             NcepModel::Hrrr => HRRR_CATEGORIES,
         }
     }
 
     pub fn sectors(&self) -> &'static [&'static str] {
         match self {
-            NcepModel::Gfs  => GFS_SECTORS,
-            NcepModel::Nam  => NAM_SECTORS,
-            NcepModel::Rap  => RAP_SECTORS,
+            NcepModel::Gfs => GFS_SECTORS,
+            NcepModel::Nam => NAM_SECTORS,
+            NcepModel::Rap => RAP_SECTORS,
             NcepModel::Hrrr => HRRR_SECTORS,
         }
     }
 
     pub fn forecast_hours(&self) -> Vec<u16> {
         match self {
-            NcepModel::Gfs  => gfs_hours(),
-            NcepModel::Nam  => nam_hours(),
-            NcepModel::Rap  => rap_hours(),
+            NcepModel::Gfs => gfs_hours(),
+            NcepModel::Nam => nam_hours(),
+            NcepModel::Rap => rap_hours(),
             NcepModel::Hrrr => hrrr_hours(),
         }
     }
 
     pub fn all() -> &'static [NcepModel] {
-        &[NcepModel::Gfs, NcepModel::Nam, NcepModel::Rap, NcepModel::Hrrr]
+        &[
+            NcepModel::Gfs,
+            NcepModel::Nam,
+            NcepModel::Rap,
+            NcepModel::Hrrr,
+        ]
     }
 }
 
@@ -375,14 +424,19 @@ pub async fn fetch_latest_run(
         .context("NCEP run-time page read")?;
 
     // Parse: data-cycle-date="2024 0524 12 UTC"  → strip spaces/UTC → "2024052412"
-    let run = parse_run_from_html(&html, model, sector, first_param)
-        .unwrap_or_else(|| default_run_time());
+    let run =
+        parse_run_from_html(&html, model, sector, first_param).unwrap_or_else(default_run_time);
 
     cache.put(&url, run.as_bytes(), Duration::from_secs(30 * 60));
     Ok(run)
 }
 
-fn parse_run_from_html(html: &str, _model: &NcepModel, _sector: &str, _param: &str) -> Option<String> {
+fn parse_run_from_html(
+    html: &str,
+    _model: &NcepModel,
+    _sector: &str,
+    _param: &str,
+) -> Option<String> {
     // MAG emits data-cycle-date with either quote style:
     //   data-cycle-date="2024 0524 12 UTC" or data-cycle-date='20260525 00 UTC'
     for marker in ["data-cycle-date=\"", "data-cycle-date='"] {
@@ -445,7 +499,7 @@ pub async fn fetch_frame(
     match fetch_frame_once(client, &url).await {
         Ok(bytes) => {
             cache.put(&url, &bytes, Duration::from_secs(60 * 60));
-            return Ok(bytes);
+            Ok(bytes)
         }
         Err(primary_err) => {
             // Some products (notably precip accum/rate families) may not provide F+000.
@@ -461,7 +515,7 @@ pub async fn fetch_frame(
                     }
                 }
             }
-            return Err(primary_err);
+            Err(primary_err)
         }
     }
 }
@@ -474,7 +528,11 @@ async fn fetch_frame_once(client: &Client, url: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("NCEP frame fetch failed for {url}"))?
         .error_for_status()
         .with_context(|| format!("NCEP frame HTTP status error for {url}"))?;
-    if let Some(ct) = response.headers().get(CONTENT_TYPE).and_then(|h| h.to_str().ok()) {
+    if let Some(ct) = response
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+    {
         if !ct.starts_with("image/") {
             bail!("NCEP frame response was not an image for {url} (content-type: {ct})");
         }

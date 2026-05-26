@@ -5,6 +5,10 @@
  * builds the main window, and runs the event loop.
  */
 
+// GTK4 TreeView/TreeStore family was deprecated in 4.10; migration to
+// GtkListView is a significant refactor deferred to future work.
+#![allow(deprecated)]
+
 mod alerts_pane;
 mod app;
 mod config;
@@ -12,7 +16,6 @@ mod forecast_pane;
 mod location_panel;
 mod models_pane;
 mod national_pane;
-mod soundings_pane;
 mod observations_pane;
 mod panel;
 mod radar_overlay_dialog;
@@ -20,6 +23,7 @@ mod radar_pane;
 mod runtime;
 mod satellite_pane;
 mod settings_panel;
+mod soundings_pane;
 mod spc_pane;
 mod text_pane;
 mod ui;

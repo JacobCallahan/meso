@@ -42,6 +42,7 @@ pub struct Warning {
 }
 
 impl Warning {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         url: String,
         area: String,
@@ -110,7 +111,7 @@ fn clean_time(t: &str) -> String {
 fn parse_polygon(raw: &str) -> Vec<LatLon> {
     // raw is like "-97.5,35.2 -97.6,35.3 ..."
     let mut points = Vec::new();
-    let cleaned = raw.replace('[', "").replace(']', "").replace(',', " ");
+    let cleaned = raw.replace([',', '[', ']'], " ");
     let nums: Vec<f64> = cleaned
         .split_whitespace()
         .filter_map(|s| s.parse().ok())
@@ -329,5 +330,109 @@ pub fn outlook_url(day: u8, outlook_type: &str) -> String {
         format!("{SPC_BASE}/products/outlook/day3otlk_{outlook_type}.gif")
     } else {
         format!("{SPC_BASE}/products/exper/day4-8/day{day}prob.gif")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── vtec_is_current ───────────────────────────────────────────────────────
+
+    #[test]
+    fn vtec_expired_is_not_current() {
+        assert!(!vtec_is_current(
+            "O.EXP.KTLX.TO.W.0001.000000T0000Z-000000T0000Z"
+        ));
+    }
+
+    #[test]
+    fn vtec_cancelled_is_not_current() {
+        assert!(!vtec_is_current(
+            "O.CAN.KTLX.TO.W.0001.000000T0000Z-000000T0000Z"
+        ));
+    }
+
+    #[test]
+    fn vtec_new_is_current() {
+        assert!(vtec_is_current(
+            "O.NEW.KTLX.TO.W.0001.000000T0000Z-000000T0000Z"
+        ));
+    }
+
+    #[test]
+    fn vtec_empty_is_current() {
+        // Default: treat unrecognised/empty strings as active.
+        assert!(vtec_is_current(""));
+    }
+
+    // ── clean_time ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_time_strips_offset_and_t() {
+        // NWS times look like "2024-06-15T21:45:00-05:00"
+        let cleaned = clean_time("2024-06-15T21:45:00-05:00");
+        assert!(!cleaned.contains('T'), "T should be replaced with space");
+        assert!(!cleaned.contains("-05:00"), "offset should be stripped");
+        assert!(cleaned.contains("2024-06-15"), "date should be preserved");
+    }
+
+    #[test]
+    fn clean_time_passthrough_without_offset() {
+        let cleaned = clean_time("2024-06-15T21:45:00Z");
+        assert!(!cleaned.contains('T'));
+        assert!(cleaned.contains("2024-06-15 21:45:00Z"));
+    }
+
+    // ── parse_polygon ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_polygon_empty_string_is_empty_vec() {
+        assert!(parse_polygon("").is_empty());
+    }
+
+    #[test]
+    fn parse_polygon_single_pair() {
+        // NWS GeoJSON coords: [lon, lat]
+        let pts = parse_polygon("-97.5 35.2");
+        assert_eq!(pts.len(), 1);
+        assert!((pts[0].lon - (-97.5)).abs() < 0.001);
+        assert!((pts[0].lat - 35.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_polygon_comma_separated_pairs() {
+        // Some NWS polygons arrive as "lon,lat lon,lat ..."
+        let pts = parse_polygon("-97.5,35.2 -97.6,35.3");
+        assert_eq!(pts.len(), 2);
+        assert!((pts[0].lat - 35.2).abs() < 0.001);
+        assert!((pts[1].lat - 35.3).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_polygon_odd_count_ignores_trailing() {
+        // Three numbers → only one complete pair.
+        let pts = parse_polygon("-97.5 35.2 -97.6");
+        assert_eq!(pts.len(), 1);
+    }
+
+    // ── URL helpers ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn mcd_url_contains_number() {
+        let url = mcd_url(42);
+        assert!(url.contains("042") || url.contains("42"), "url={url}");
+    }
+
+    #[test]
+    fn outlook_url_day1_points_to_day1_product() {
+        let url = outlook_url(1, "cat");
+        assert!(url.contains("day1"), "url={url}");
+    }
+
+    #[test]
+    fn outlook_url_day4_points_to_exper() {
+        let url = outlook_url(4, "prob");
+        assert!(url.contains("exper") || url.contains("day4"), "url={url}");
     }
 }

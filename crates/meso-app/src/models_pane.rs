@@ -12,7 +12,6 @@
  *   • ⟳ Refresh — clears local cache for current product and re-fetches
  */
 
-use glib;
 use gtk4::prelude::*;
 use gtk4::{
     Box as GBox, Button, CellRendererText, DrawingArea, DropDown, Label, Orientation, Paned,
@@ -103,11 +102,11 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     let saved_sector = shared_config.borrow().ncep_sector.clone();
 
     let initial_active_model = match saved_model_type.as_str() {
-        "gfs"  => ActiveModel::Ncep(ncep::NcepModel::Gfs),
-        "nam"  => ActiveModel::Ncep(ncep::NcepModel::Nam),
-        "rap"  => ActiveModel::Ncep(ncep::NcepModel::Rap),
+        "gfs" => ActiveModel::Ncep(ncep::NcepModel::Gfs),
+        "nam" => ActiveModel::Ncep(ncep::NcepModel::Nam),
+        "rap" => ActiveModel::Ncep(ncep::NcepModel::Rap),
         "hrrr" => ActiveModel::Ncep(ncep::NcepModel::Hrrr),
-        _      => ActiveModel::Sref,
+        _ => ActiveModel::Sref,
     };
 
     let initial_state = {
@@ -287,12 +286,7 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
             let st_c = Rc::clone(&state_p);
             let da_c = da_p.clone();
             drag.connect_drag_update(move |_, ox, oy| {
-                if let Some((sx, sy)) = *ds.borrow() {
-                    let dx = ox - (sx - sx); // offset from begin
-                    let dy = oy - (sy - sy);
-                    let _ = (dx, dy); // suppress unused
-                    let _ = (ox, oy);
-                }
+                let _ = &ds;
                 let (origin_x, origin_y) = *po.borrow();
                 let pb_size = st_c
                     .borrow()
@@ -424,7 +418,7 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     let fav_cat_iter: Rc<RefCell<Option<gtk4::TreeIter>>> = Rc::new(RefCell::new(None));
     let fi = store.append(None);
     store.set(&fi, &[(0, &"⭐ Favorites"), (1, &""), (2, &true)]);
-    *fav_cat_iter.borrow_mut() = Some(fi.clone());
+    *fav_cat_iter.borrow_mut() = Some(fi);
     // Populate saved favorites from config
     {
         let favs = shared_config.borrow().model_favorites.clone();
@@ -617,7 +611,7 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
             if state_f.borrow().active_model != ActiveModel::Sref {
                 return;
             }
-            let fi = match fav_iter_f.borrow().clone() {
+            let fi = match *fav_iter_f.borrow() {
                 Some(fi) => fi,
                 None => return,
             };
@@ -695,7 +689,10 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         let sector_strings_m = sector_strings.clone();
 
         model_combo.connect_selected_notify(move |combo| {
-            let id = MODEL_IDS.get(combo.selected() as usize).copied().unwrap_or("sref");
+            let id = MODEL_IDS
+                .get(combo.selected() as usize)
+                .copied()
+                .unwrap_or("sref");
             // Stop any running animation
             if ar_m.get() {
                 ar_m.set(false);
@@ -706,11 +703,11 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
             }
 
             let new_model = match id {
-                "gfs"  => ActiveModel::Ncep(ncep::NcepModel::Gfs),
-                "nam"  => ActiveModel::Ncep(ncep::NcepModel::Nam),
-                "rap"  => ActiveModel::Ncep(ncep::NcepModel::Rap),
+                "gfs" => ActiveModel::Ncep(ncep::NcepModel::Gfs),
+                "nam" => ActiveModel::Ncep(ncep::NcepModel::Nam),
+                "rap" => ActiveModel::Ncep(ncep::NcepModel::Rap),
                 "hrrr" => ActiveModel::Ncep(ncep::NcepModel::Hrrr),
-                _      => ActiveModel::Sref,
+                _ => ActiveModel::Sref,
             };
 
             // Update sector combo
@@ -765,7 +762,8 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
                             for prod in cat.products {
                                 if prod.id == fav_id.as_str() {
                                     let iter = store_m.append(Some(&fi));
-                                    store_m.set(&iter, &[(0, &prod.label), (1, &prod.id), (2, &true)]);
+                                    store_m
+                                        .set(&iter, &[(0, &prod.label), (1, &prod.id), (2, &true)]);
                                     break 'outer;
                                 }
                             }
@@ -828,7 +826,7 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         let n = sector_strings.n_items();
         let saved = saved_sector.as_str();
         let pos = (0..n)
-            .find(|&i| sector_strings.string(i).map_or(false, |s| s == saved))
+            .find(|&i| sector_strings.string(i).is_some_and(|s| s == saved))
             .unwrap_or(0);
         sector_combo.set_selected(pos);
     }
@@ -840,7 +838,7 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         model_combo.connect_selected_notify(move |_| {
             let st = state_persist.borrow();
             let type_str = match &st.active_model {
-                ActiveModel::Sref     => "sref",
+                ActiveModel::Sref => "sref",
                 ActiveModel::Ncep(m) => m.short(),
             };
             cfg_persist.borrow_mut().ncep_model_type = type_str.to_string();
@@ -886,7 +884,7 @@ pub fn build_models_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
                     tl_a.clone(),
                     Rc::clone(&su_a),
                 );
-             } else {
+            } else {
                 // Fetch all frames
                 let product_id = state_a.borrow().current_product_id.clone();
                 if product_id.is_empty() {
@@ -1235,7 +1233,11 @@ fn load_ncep_image(
     for b in &btns {
         b.set_sensitive(false);
     }
-    status.set_text(&format!("Loading {} {} F+{hour:03}...", model.label(), &product_id));
+    status.set_text(&format!(
+        "Loading {} {} F+{hour:03}...",
+        model.label(),
+        &product_id
+    ));
 
     // Grab cached run time (may be empty)
     let cached_run = state.borrow().ncep_run.clone();
@@ -1248,7 +1250,8 @@ fn load_ncep_image(
             } else {
                 cached_run
             };
-            let bytes = ncep::fetch_frame(&client, &model, &run, &sector, &product_id, hour).await?;
+            let bytes =
+                ncep::fetch_frame(&client, &model, &run, &sector, &product_id, hour).await?;
             Ok::<_, anyhow::Error>((bytes, run))
         },
         move |result| {
@@ -1340,7 +1343,10 @@ fn fetch_ncep_animation(
                         .map(|(h, _)| {
                             if let Some(init) = run_init {
                                 let valid = init + chrono::Duration::hours(*h as i64);
-                                valid.with_timezone(&chrono::Local).format("%m/%d %H:%M").to_string()
+                                valid
+                                    .with_timezone(&chrono::Local)
+                                    .format("%m/%d %H:%M")
+                                    .to_string()
                             } else {
                                 format!("F+{h:03}")
                             }
@@ -1367,7 +1373,9 @@ fn fetch_ncep_animation(
                     timeline.set_sensitive(true);
                     slider_updating.set(false);
                     if skipped > 0 {
-                        status.set_text(&format!("Animating {n} frames | {model_label} | skipped {skipped}"));
+                        status.set_text(&format!(
+                            "Animating {n} frames | {model_label} | skipped {skipped}"
+                        ));
                     } else {
                         status.set_text(&format!("Animating {n} frames | {model_label}"));
                     }

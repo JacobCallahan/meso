@@ -95,7 +95,7 @@ impl RadarPaneState {
                 lon: cfg.radar_center_lon,
             }
         } else {
-            site_center.clone()
+            site_center
         };
         let mut vp = Viewport::new(site_center, 800, 600);
         vp.center = center;
@@ -179,6 +179,7 @@ impl RadarPaneState {
 
 // ── Public widget builder ─────────────────────────────────────────────────────
 
+#[allow(clippy::type_complexity)]
 pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&str)>) {
     let cfg_snapshot = shared_cfg.borrow().clone();
     let map_data = Rc::new(MapData::load());
@@ -216,9 +217,15 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
     let sites_list = sites::all_sites();
     let current_site = left_state.borrow().site_id.clone();
     let site_combo = {
-        let labels: Vec<String> = sites_list.iter().map(|(id, name)| format!("{id} - {name}")).collect();
+        let labels: Vec<String> = sites_list
+            .iter()
+            .map(|(id, name)| format!("{id} - {name}"))
+            .collect();
         let combo = DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
-        let active_idx = sites_list.iter().position(|(id, _)| *id == current_site).unwrap_or(0);
+        let active_idx = sites_list
+            .iter()
+            .position(|(id, _)| *id == current_site)
+            .unwrap_or(0);
         combo.set_selected(active_idx as u32);
         combo
     };
@@ -241,14 +248,21 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                 .filter(|p| p.is_map_supported())
                 .unwrap_or(RadarProduct::N0Q);
             let grp_pos = RadarProduct::PRODUCT_GROUPS
-                .iter().position(|&g| g == selected.group_name()).unwrap_or(0);
+                .iter()
+                .position(|&g| g == selected.group_name())
+                .unwrap_or(0);
             group_combo.set_selected(grp_pos as u32);
             let products: Vec<RadarProduct> = RadarProduct::for_group(selected.group_name())
-                .into_iter().filter(|p| p.is_map_supported()).collect();
+                .into_iter()
+                .filter(|p| p.is_map_supported())
+                .collect();
             let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
             prod_strings.splice(0, prod_strings.n_items(), &labels);
             *prod_codes.borrow_mut() = products.iter().map(|p| p.code()).collect();
-            let code_pos = products.iter().position(|p| p.code() == selected.code()).unwrap_or(0);
+            let code_pos = products
+                .iter()
+                .position(|p| p.code() == selected.code())
+                .unwrap_or(0);
             prod_combo.set_selected(code_pos as u32);
         }
     };
@@ -272,7 +286,11 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
     refresh_btn.set_tooltip_text(Some("Reload current radar product"));
     let anim_btn = Button::with_label("▶ Animate");
     anim_btn.set_tooltip_text(Some("Animate recent radar frames"));
-    let pane_toggle_btn = Button::with_label(if pane_count.get() == 2 { "2▮" } else { "1▮" });
+    let pane_toggle_btn = Button::with_label(if pane_count.get() == 2 {
+        "2▮"
+    } else {
+        "1▮"
+    });
     pane_toggle_btn.set_tooltip_text(Some("Toggle 1/2 radar panes"));
     let overlay_btn = Button::with_label("⚙");
     overlay_btn.set_tooltip_text(Some("Radar display settings"));
@@ -338,7 +356,11 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         let left_overlay = left_overlay.clone();
         let right_overlay = right_overlay.clone();
         Rc::new(move |slot_in: u8| {
-            let slot = if pane_count.get() == 1 { 0 } else { slot_in.min(1) };
+            let slot = if pane_count.get() == 1 {
+                0
+            } else {
+                slot_in.min(1)
+            };
             active_slot.set(slot);
             active_label.set_text(if slot == 0 { "L" } else { "R" });
 
@@ -360,14 +382,21 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                 right_state.borrow().product
             };
             let grp_pos = RadarProduct::PRODUCT_GROUPS
-                .iter().position(|&g| g == selected.group_name()).unwrap_or(0);
+                .iter()
+                .position(|&g| g == selected.group_name())
+                .unwrap_or(0);
             group_combo.set_selected(grp_pos as u32);
             let products: Vec<RadarProduct> = RadarProduct::for_group(selected.group_name())
-                .into_iter().filter(|p| p.is_map_supported()).collect();
+                .into_iter()
+                .filter(|p| p.is_map_supported())
+                .collect();
             let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
             prod_strings.splice(0, prod_strings.n_items(), &labels);
             *prod_codes.borrow_mut() = products.iter().map(|p| p.code()).collect();
-            let code_pos = products.iter().position(|p| p.code() == selected.code()).unwrap_or(0);
+            let code_pos = products
+                .iter()
+                .position(|p| p.code() == selected.code())
+                .unwrap_or(0);
             prod_combo.set_selected(code_pos as u32);
         })
     };
@@ -439,7 +468,14 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                 cr.move_to(x, y);
                 let _ = cr.show_text(ts);
             }
-            draw_major_roads(cr, w, h, &st.viewport, st.map_data.as_ref(), &cfg_draw.borrow());
+            draw_major_roads(
+                cr,
+                w,
+                h,
+                &st.viewport,
+                st.map_data.as_ref(),
+                &cfg_draw.borrow(),
+            );
             draw_location_markers(cr, w, h, &st.viewport, &cfg_draw.borrow());
             draw_custom_tracks(cr, w, h, &st.viewport, &cfg_draw.borrow());
         });
@@ -489,7 +525,14 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                 cr.move_to(x, y);
                 let _ = cr.show_text(ts);
             }
-            draw_major_roads(cr, w, h, &st.viewport, st.map_data.as_ref(), &cfg_draw.borrow());
+            draw_major_roads(
+                cr,
+                w,
+                h,
+                &st.viewport,
+                st.map_data.as_ref(),
+                &cfg_draw.borrow(),
+            );
             draw_location_markers(cr, w, h, &st.viewport, &cfg_draw.borrow());
             draw_custom_tracks(cr, w, h, &st.viewport, &cfg_draw.borrow());
         });
@@ -512,7 +555,7 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                     l.render_from_cache();
                 }
                 let mut r = right_state.borrow_mut();
-                r.viewport.center = l.viewport.center.clone();
+                r.viewport.center = l.viewport.center;
                 r.viewport.zoom = l.viewport.zoom;
                 has_anim |= !r.anim_pixbufs.is_empty();
                 if !has_anim {
@@ -686,7 +729,7 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             {
                 let pane_state = Rc::clone(&pane_state);
                 let status = status_rc.clone();
-                let clicked = clicked_ll.clone();
+                let clicked = clicked_ll;
                 let pop = popover.clone();
                 inspect_btn.connect_clicked(move |_| {
                     let st = pane_state.borrow();
@@ -697,7 +740,7 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             {
                 let cfg = Rc::clone(&cfg_rc);
                 let status = status_rc.clone();
-                let clicked = clicked_ll.clone();
+                let clicked = clicked_ll;
                 let frame_time = frame_time.clone();
                 let left_da = left_da_rc.clone();
                 let right_da = right_da_rc.clone();
@@ -727,7 +770,7 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             {
                 let cfg = Rc::clone(&cfg_rc);
                 let status = status_rc.clone();
-                let clicked = clicked_ll.clone();
+                let clicked = clicked_ll;
                 let left_da = left_da_rc.clone();
                 let right_da = right_da_rc.clone();
                 let pop = popover.clone();
@@ -747,7 +790,7 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             {
                 let cfg = Rc::clone(&cfg_rc);
                 let status = status_rc.clone();
-                let clicked = clicked_ll.clone();
+                let clicked = clicked_ll;
                 let left_da = left_da_rc.clone();
                 let right_da = right_da_rc.clone();
                 let pop = popover.clone();
@@ -871,14 +914,15 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             pane_count_c.set(count);
             right_overlay_c.set_visible(count == 2);
             toggle_btn.set_label(if count == 2 { "2▮" } else { "1▮" });
-            
+
             // Stop animation before switching panes
             stop_animation(&anim_running_c, &anim_timer_c);
-            
+
             // Clear animation pixbuf caches when switching pane count so frames re-render at correct size
             {
                 let mut left_st = left_state_c.borrow_mut();
-                let has_anim = !left_st.anim_l2_frames.is_empty() || !left_st.anim_l3_frames.is_empty();
+                let has_anim =
+                    !left_st.anim_l2_frames.is_empty() || !left_st.anim_l3_frames.is_empty();
                 if has_anim {
                     left_st.anim_pixbufs.clear();
                     left_st.anim_index = 0;
@@ -887,20 +931,21 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             }
             {
                 let mut right_st = right_state_c.borrow_mut();
-                let has_anim = !right_st.anim_l2_frames.is_empty() || !right_st.anim_l3_frames.is_empty();
+                let has_anim =
+                    !right_st.anim_l2_frames.is_empty() || !right_st.anim_l3_frames.is_empty();
                 if has_anim {
                     right_st.anim_pixbufs.clear();
                     right_st.anim_index = 0;
                     right_st.current_pixbuf = None;
                 }
             }
-            
+
             let mut cfg = cfg_c.borrow_mut();
             cfg.radar_pane_count = count;
             cfg.radar_dual_pane = count == 2;
             drop(cfg);
             set_active_ui(if count == 2 { 1 } else { 0 });
-            
+
             // Re-render animation frames at new viewport size if any exist
             {
                 let left_st = left_state_c.borrow();
@@ -916,9 +961,13 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                     re_render_all_anim_frames_idle(Rc::clone(&right_state_c), right_da_c.clone());
                 }
             }
-            
+
             if count == 2 {
-                refresh_warnings(Rc::clone(&right_state_c), right_da_c.clone(), Rc::clone(&cfg_c));
+                refresh_warnings(
+                    Rc::clone(&right_state_c),
+                    right_da_c.clone(),
+                    Rc::clone(&cfg_c),
+                );
                 refresh_storm_tracks(
                     Rc::clone(&right_state_c),
                     right_da_c.clone(),
@@ -979,8 +1028,16 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                 btns.clone(),
                 tilt_combo_c.clone(),
             );
-            refresh_warnings(Rc::clone(&left_state_c), left_da_c.clone(), Rc::clone(&cfg_c));
-            refresh_storm_tracks(Rc::clone(&left_state_c), left_da_c.clone(), Rc::clone(&cfg_c));
+            refresh_warnings(
+                Rc::clone(&left_state_c),
+                left_da_c.clone(),
+                Rc::clone(&cfg_c),
+            );
+            refresh_storm_tracks(
+                Rc::clone(&left_state_c),
+                left_da_c.clone(),
+                Rc::clone(&cfg_c),
+            );
             if pane_count_c.get() == 2 {
                 trigger_load(
                     Rc::clone(&right_state_c),
@@ -1012,7 +1069,9 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         group_combo.connect_selected_notify(move |group_combo| {
             let group = RadarProduct::PRODUCT_GROUPS[group_combo.selected() as usize];
             let products: Vec<RadarProduct> = RadarProduct::for_group(group)
-                .into_iter().filter(|p| p.is_map_supported()).collect();
+                .into_iter()
+                .filter(|p| p.is_map_supported())
+                .collect();
             let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
             prod_strings_g.splice(0, prod_strings_g.n_items(), &labels);
             *prod_codes_g.borrow_mut() = products.iter().map(|p| p.code()).collect();
@@ -1039,7 +1098,11 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             let codes = prod_codes_c.borrow();
             if let Some(&code) = codes.get(combo.selected() as usize) {
                 if let Some(prod) = RadarProduct::from_code(code).filter(|p| p.is_map_supported()) {
-                    let slot = if pane_count_c.get() == 1 { 0 } else { active_slot_c.get() };
+                    let slot = if pane_count_c.get() == 1 {
+                        0
+                    } else {
+                        active_slot_c.get()
+                    };
                     let current_product = if slot == 0 {
                         left_state_c.borrow().product
                     } else {
@@ -1096,8 +1159,15 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         let prod_sel = prod_combo.clone();
         let btn = subscribe_btn.clone();
         let update_sub_btn = move || {
-            let station = site_ids_sub.get(site_sel.selected() as usize).cloned().unwrap_or_default();
-            let product = prod_codes_sub.borrow().get(prod_sel.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
+            let station = site_ids_sub
+                .get(site_sel.selected() as usize)
+                .cloned()
+                .unwrap_or_default();
+            let product = prod_codes_sub
+                .borrow()
+                .get(prod_sel.selected() as usize)
+                .map(|&s| s.to_string())
+                .unwrap_or_default();
             if !station.is_empty() && !product.is_empty() {
                 let subs = load_subscriptions();
                 btn.set_label(if subs.is_radar_subscribed(&station, &product) {
@@ -1116,8 +1186,15 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             let prod_c2 = prod_combo.clone();
             let btn2 = subscribe_btn.clone();
             site_combo.connect_selected_notify(move |combo| {
-                let station = site_ids_2.get(combo.selected() as usize).cloned().unwrap_or_default();
-                let product = prod_codes_2.borrow().get(prod_c2.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
+                let station = site_ids_2
+                    .get(combo.selected() as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let product = prod_codes_2
+                    .borrow()
+                    .get(prod_c2.selected() as usize)
+                    .map(|&s| s.to_string())
+                    .unwrap_or_default();
                 if !station.is_empty() && !product.is_empty() {
                     let subs = load_subscriptions();
                     btn2.set_label(if subs.is_radar_subscribed(&station, &product) {
@@ -1136,8 +1213,15 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             let site_c3 = site_combo.clone();
             let btn3 = subscribe_btn.clone();
             prod_combo.connect_selected_notify(move |combo| {
-                let station = site_ids_3.get(site_c3.selected() as usize).cloned().unwrap_or_default();
-                let product = prod_codes_3.borrow().get(combo.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
+                let station = site_ids_3
+                    .get(site_c3.selected() as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let product = prod_codes_3
+                    .borrow()
+                    .get(combo.selected() as usize)
+                    .map(|&s| s.to_string())
+                    .unwrap_or_default();
                 if !station.is_empty() && !product.is_empty() {
                     let subs = load_subscriptions();
                     btn3.set_label(if subs.is_radar_subscribed(&station, &product) {
@@ -1157,8 +1241,15 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
             let prod_c4 = prod_combo.clone();
             let btn4 = subscribe_btn.clone();
             subscribe_btn.connect_clicked(move |_| {
-                let station = site_ids_4.get(site_c4.selected() as usize).cloned().unwrap_or_default();
-                let product = prod_codes_4.borrow().get(prod_c4.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
+                let station = site_ids_4
+                    .get(site_c4.selected() as usize)
+                    .cloned()
+                    .unwrap_or_default();
+                let product = prod_codes_4
+                    .borrow()
+                    .get(prod_c4.selected() as usize)
+                    .map(|&s| s.to_string())
+                    .unwrap_or_default();
                 if station.is_empty() || product.is_empty() {
                     return;
                 }
@@ -1190,8 +1281,16 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                 btns_ref.clone(),
                 tilt_combo_c.clone(),
             );
-            refresh_warnings(Rc::clone(&left_state_c), left_da_c.clone(), Rc::clone(&cfg_c));
-            refresh_storm_tracks(Rc::clone(&left_state_c), left_da_c.clone(), Rc::clone(&cfg_c));
+            refresh_warnings(
+                Rc::clone(&left_state_c),
+                left_da_c.clone(),
+                Rc::clone(&cfg_c),
+            );
+            refresh_storm_tracks(
+                Rc::clone(&left_state_c),
+                left_da_c.clone(),
+                Rc::clone(&cfg_c),
+            );
             if pane_count_c.get() == 2 {
                 trigger_load(
                     Rc::clone(&right_state_c),
@@ -1225,7 +1324,11 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         let pane_count_tc = Rc::clone(&pane_count);
         tilt_combo.connect_selected_notify(move |combo| {
             let sel = combo.selected() as usize;
-            let slot = if pane_count_tc.get() == 1 { 0 } else { active_slot_tc.get() };
+            let slot = if pane_count_tc.get() == 1 {
+                0
+            } else {
+                active_slot_tc.get()
+            };
             let (state_ref, da_ref) = if slot == 0 {
                 (Rc::clone(&left_state_tc), left_da_tc.clone())
             } else {
@@ -1239,7 +1342,10 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                 let vel = st.product == RadarProduct::L2Velocity;
                 (idx, bytes, vel)
             };
-            let raw = match raw_bytes { Some(b) => b, None => return };
+            let raw = match raw_bytes {
+                Some(b) => b,
+                None => return,
+            };
             {
                 let mut st = state_ref.borrow_mut();
                 st.l2_tilt_idx = tilt_idx;
@@ -1432,7 +1538,10 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
                         pending_c.set(left);
                         if left == 0 {
                             anim_btn_done.set_sensitive(true);
-                            if failed_c.get() || min_frames_c.get() == 0 || min_frames_c.get() == usize::MAX {
+                            if failed_c.get()
+                                || min_frames_c.get() == 0
+                                || min_frames_c.get() == usize::MAX
+                            {
                                 ar_done.set(false);
                                 anim_btn_done.set_label("▶ Animate");
                                 return;
@@ -1684,7 +1793,7 @@ fn load_animation_frames<F>(
     F: Fn(Result<usize, String>) + 'static,
 {
     let on_done: Rc<dyn Fn(Result<usize, String>)> = Rc::new(on_done);
-    let product = state.borrow().product.clone();
+    let product = state.borrow().product;
     let site_id = state.borrow().site_id.clone();
     let progress: runtime::ProgressSlot = Arc::new(Mutex::new(None));
     let stop_progress = runtime::progress_poller(Arc::clone(&progress), status.clone());
@@ -1714,7 +1823,10 @@ fn load_animation_frames<F>(
                         *g = Some(format!("Fetching/decompressing frame {}/{}", i + 1, total));
                     }
                     let url = format!("{base}{fname}");
-                    frames.push(dl.fetch_level2_decompressed(&site_id, &l2_product, &url).await?);
+                    frames.push(
+                        dl.fetch_level2_decompressed(&site_id, &l2_product, &url)
+                            .await?,
+                    );
                 }
                 Ok::<_, anyhow::Error>((frames, velocity))
             },
@@ -1791,7 +1903,7 @@ fn load_animation_frames<F>(
                     if let Ok(mut g) = progress_c.lock() {
                         *g = Some(format!("Fetching frame {}/{}", i + 1, total));
                     }
-                    if let Some(url) = RadarDownloader::level3_file_url(&site_id, &product, &fname) {
+                    if let Some(url) = RadarDownloader::level3_file_url(&site_id, &product, fname) {
                         frames.push(dl.fetch_bytes(&url).await?);
                     }
                 }
@@ -1854,6 +1966,7 @@ fn load_animation_frames<F>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_animation(
     state: Rc<RefCell<RadarPaneState>>,
     drawing_area: DrawingArea,
@@ -1867,7 +1980,7 @@ fn start_animation(
 ) {
     running.set(true);
     anim_btn.set_sensitive(false);
-    let product = state.borrow().product.clone();
+    let product = state.borrow().product;
     let site_id = state.borrow().site_id.clone();
 
     // Progress slot: async task writes "Fetching frame N/M", GTK poller reads it
@@ -2080,41 +2193,41 @@ fn render_l2_frames_idle(
                 let n = bufs.len();
                 // Configure timeline range and reset to frame 0
                 slider_updating.set(true);
-               if n > 0 {
-                   // Set range first (without value changing)
-                   timeline.set_range(0.0, (n - 1) as f64);
-                   timeline.set_value(0.0);
-                   timeline.set_sensitive(true);
-               } else {
-                   timeline.set_sensitive(false);
-               }
-               slider_updating.set(false);
-                
-               // Verify timeline value in idle callback after GTK processes signals
-               if n > 0 {
-                   let timeline_c = timeline.clone();
-                   let su_c = Rc::clone(&slider_updating);
-                   glib::idle_add_local(move || {
-                       if timeline_c.value() != 0.0 {
-                           su_c.set(true);
-                           timeline_c.set_value(0.0);
-                           su_c.set(false);
-                       }
-                       glib::ControlFlow::Break
-                   });
-               }
-               {
-                   let mut st = state.borrow_mut();
-                   st.anim_pixbufs = bufs;
-                   st.anim_timestamps = ts;
-                   st.anim_index = 0;
-                   st.anim_l2_frames = dec;
-                   st.anim_l3_frames.clear();
-                   st.current_pixbuf = Some(st.anim_pixbufs[0].clone());
-               }
-               status.set_text(&format!("Animating {n} frames{span}"));
-               anim_btn.set_label("⏸ Pause");
-               start_timer(
+                if n > 0 {
+                    // Set range first (without value changing)
+                    timeline.set_range(0.0, (n - 1) as f64);
+                    timeline.set_value(0.0);
+                    timeline.set_sensitive(true);
+                } else {
+                    timeline.set_sensitive(false);
+                }
+                slider_updating.set(false);
+
+                // Verify timeline value in idle callback after GTK processes signals
+                if n > 0 {
+                    let timeline_c = timeline.clone();
+                    let su_c = Rc::clone(&slider_updating);
+                    glib::idle_add_local(move || {
+                        if timeline_c.value() != 0.0 {
+                            su_c.set(true);
+                            timeline_c.set_value(0.0);
+                            su_c.set(false);
+                        }
+                        glib::ControlFlow::Break
+                    });
+                }
+                {
+                    let mut st = state.borrow_mut();
+                    st.anim_pixbufs = bufs;
+                    st.anim_timestamps = ts;
+                    st.anim_index = 0;
+                    st.anim_l2_frames = dec;
+                    st.anim_l3_frames.clear();
+                    st.current_pixbuf = Some(st.anim_pixbufs[0].clone());
+                }
+                status.set_text(&format!("Animating {n} frames{span}"));
+                anim_btn.set_label("⏸ Pause");
+                start_timer(
                     Rc::clone(&state),
                     drawing_area.clone(),
                     Rc::clone(&running),
@@ -2185,41 +2298,41 @@ fn render_l3_frames_idle(
                 let span = time_span_str(&ts);
                 let n = bufs.len();
                 slider_updating.set(true);
-               if n > 0 {
-                   // Set range first (without value changing)
-                   timeline.set_range(0.0, (n - 1) as f64);
-                   timeline.set_value(0.0);
-                   timeline.set_sensitive(true);
-               } else {
-                   timeline.set_sensitive(false);
-               }
-               slider_updating.set(false);
-                
-               // Verify timeline value in idle callback after GTK processes signals
-               if n > 0 {
-                   let timeline_c = timeline.clone();
-                   let su_c = Rc::clone(&slider_updating);
-                   glib::idle_add_local(move || {
-                       if timeline_c.value() != 0.0 {
-                           su_c.set(true);
-                           timeline_c.set_value(0.0);
-                           su_c.set(false);
-                       }
-                       glib::ControlFlow::Break
-                   });
-               }
-               {
-                   let mut st = state.borrow_mut();
-                   st.anim_pixbufs = bufs;
-                   st.anim_timestamps = ts;
-                   st.anim_index = 0;
-                   st.anim_l3_frames = dec;
-                   st.anim_l2_frames.clear();
-                   st.current_pixbuf = Some(st.anim_pixbufs[0].clone());
-               }
-               status.set_text(&format!("Animating {n} frames{span}"));
-               anim_btn.set_label("⏸ Pause");
-               start_timer(
+                if n > 0 {
+                    // Set range first (without value changing)
+                    timeline.set_range(0.0, (n - 1) as f64);
+                    timeline.set_value(0.0);
+                    timeline.set_sensitive(true);
+                } else {
+                    timeline.set_sensitive(false);
+                }
+                slider_updating.set(false);
+
+                // Verify timeline value in idle callback after GTK processes signals
+                if n > 0 {
+                    let timeline_c = timeline.clone();
+                    let su_c = Rc::clone(&slider_updating);
+                    glib::idle_add_local(move || {
+                        if timeline_c.value() != 0.0 {
+                            su_c.set(true);
+                            timeline_c.set_value(0.0);
+                            su_c.set(false);
+                        }
+                        glib::ControlFlow::Break
+                    });
+                }
+                {
+                    let mut st = state.borrow_mut();
+                    st.anim_pixbufs = bufs;
+                    st.anim_timestamps = ts;
+                    st.anim_index = 0;
+                    st.anim_l3_frames = dec;
+                    st.anim_l2_frames.clear();
+                    st.current_pixbuf = Some(st.anim_pixbufs[0].clone());
+                }
+                status.set_text(&format!("Animating {n} frames{span}"));
+                anim_btn.set_label("⏸ Pause");
+                start_timer(
                     Rc::clone(&state),
                     drawing_area.clone(),
                     Rc::clone(&running),
@@ -2331,10 +2444,14 @@ fn trigger_load(
     btns: Vec<Button>,
     tilt_combo: DropDown,
 ) {
-    let product = state.borrow().product.clone();
+    let product = state.borrow().product;
     match product {
-        RadarProduct::L2Reflectivity => load_level2(state, drawing_area, status, false, btns, tilt_combo),
-        RadarProduct::L2Velocity => load_level2(state, drawing_area, status, true, btns, tilt_combo.clone()),
+        RadarProduct::L2Reflectivity => {
+            load_level2(state, drawing_area, status, false, btns, tilt_combo)
+        }
+        RadarProduct::L2Velocity => {
+            load_level2(state, drawing_area, status, true, btns, tilt_combo.clone())
+        }
         _ => {
             tilt_combo.set_visible(false);
             load_level3(state, drawing_area, status, btns)
@@ -2349,7 +2466,7 @@ fn load_level3(
     btns: Vec<Button>,
 ) {
     let site_id = state.borrow().site_id.clone();
-    let product = state.borrow().product.clone();
+    let product = state.borrow().product;
     for b in &btns {
         b.set_sensitive(false);
     }
@@ -2448,8 +2565,7 @@ fn load_level2(
                 Ok(compressed) => match level2::decompress_level2(&compressed) {
                     Ok(raw) => {
                         // Populate tilt list
-                        let tilts = level2::list_tilts(&raw, velocity)
-                            .unwrap_or_default();
+                        let tilts = level2::list_tilts(&raw, velocity).unwrap_or_default();
                         let safe_tilt = tilt_idx.min(tilts.len().saturating_sub(1));
                         match level2::decode(&raw, velocity, safe_tilt) {
                             Ok(l2) => {
@@ -2475,11 +2591,14 @@ fn load_level2(
                                 }
                                 // Update tilt selector (outside state borrow)
                                 {
-                                    let labels: Vec<String> = tilts.iter()
+                                    let labels: Vec<String> = tilts
+                                        .iter()
                                         .map(|t| format!("{:.1}°", t.angle_deg))
                                         .collect();
-                                    let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-                                    if let Some(strings) = tilt_combo.model()
+                                    let label_refs: Vec<&str> =
+                                        labels.iter().map(String::as_str).collect();
+                                    if let Some(strings) = tilt_combo
+                                        .model()
                                         .and_then(|m| m.downcast::<gtk4::StringList>().ok())
                                     {
                                         strings.splice(0, strings.n_items(), &label_refs);
@@ -2672,7 +2791,7 @@ fn lookup_l2_gate(st: &RadarPaneState, range_km: f64, az: f64) -> Option<(String
         // L2 velocity encoding: dbz = raw/2 - 63.5 (m/s, then convert to knots display)
         let ms = raw as f64 / 2.0 - 63.5;
         let kt = ms * 1.944;
-        Some((format!("Vel"), kt))
+        Some(("Vel".to_string(), kt))
     } else {
         // L2 reflectivity: dBZ = raw/2 - 32
         let dbz = raw as f64 / 2.0 - 32.0;
@@ -2740,8 +2859,7 @@ fn build_inspect_message(st: &RadarPaneState, clicked_ll: &LatLon) -> String {
     let site = &st.viewport.site_origin;
     let range_km = site.distance_km(clicked_ll);
     let az = bearing_deg(site.lat, site.lon, clicked_ll.lat, clicked_ll.lon);
-    let gate_info =
-        lookup_l2_gate(st, range_km, az).or_else(|| lookup_l3_gate(st, range_km, az));
+    let gate_info = lookup_l2_gate(st, range_km, az).or_else(|| lookup_l3_gate(st, range_km, az));
     let ns = if clicked_ll.lat >= 0.0 { 'N' } else { 'S' };
     let ew = if clicked_ll.lon >= 0.0 { 'E' } else { 'W' };
     if let Some((label, value)) = gate_info {
@@ -2921,7 +3039,7 @@ fn show_location_editor_dialog(
             }
         };
 
-        if new_lat < -90.0 || new_lat > 90.0 || new_lon < -180.0 || new_lon > 180.0 {
+        if !(-90.0..=90.0).contains(&new_lat) || !(-180.0..=180.0).contains(&new_lon) {
             win_save.close();
             return;
         }
@@ -2943,7 +3061,6 @@ fn show_location_editor_dialog(
 
     win.present();
 }
-
 
 // ── Location marker drawing ───────────────────────────────────────────────────
 
@@ -3050,8 +3167,7 @@ fn draw_major_roads(
         let max_x = x1.max(x2);
         let min_y = y1.min(y2);
         let max_y = y1.max(y2);
-        if max_x < -margin || min_x > width + margin || max_y < -margin || min_y > height + margin
-        {
+        if max_x < -margin || min_x > width + margin || max_y < -margin || min_y > height + margin {
             continue;
         }
 
@@ -3118,7 +3234,8 @@ fn marker_time_minutes(point: &RadarTrackPoint) -> Option<i64> {
     if let Some(ft) = point.frame_time.as_deref() {
         let mut parts = ft.split_whitespace();
         if let (Some(date), Some(time)) = (parts.next(), parts.next()) {
-            if let Ok(dt) = NaiveDateTime::parse_from_str(&format!("{date} {time}"), "%Y-%m-%d %H:%M")
+            if let Ok(dt) =
+                NaiveDateTime::parse_from_str(&format!("{date} {time}"), "%Y-%m-%d %H:%M")
             {
                 return Some(dt.and_utc().timestamp() / 60);
             }
@@ -3152,9 +3269,7 @@ fn projected_track_points(track: &RadarTrack, cfg: &Config) -> Vec<LatLon> {
     // Sort points chronologically so projection always moves forward in time
     // regardless of the order the user placed markers.
     let mut sorted: Vec<&RadarTrackPoint> = track.points.iter().collect();
-    sorted.sort_by_key(|p| {
-        marker_time_minutes(p).unwrap_or_else(|| p.frame_index as i64 * 5)
-    });
+    sorted.sort_by_key(|p| marker_time_minutes(p).unwrap_or_else(|| p.frame_index as i64 * 5));
 
     let last = sorted.last().unwrap();
     let lat0 = last.lat;
@@ -3233,9 +3348,8 @@ fn draw_custom_tracks(
 
         // Sort markers chronologically so the drawn path always moves forward in time.
         let mut sorted_pts: Vec<&RadarTrackPoint> = track.points.iter().collect();
-        sorted_pts.sort_by_key(|p| {
-            marker_time_minutes(p).unwrap_or_else(|| p.frame_index as i64 * 5)
-        });
+        sorted_pts
+            .sort_by_key(|p| marker_time_minutes(p).unwrap_or_else(|| p.frame_index as i64 * 5));
 
         let mut screen_points: Vec<(f64, f64)> = Vec::new();
         for p in &sorted_pts {

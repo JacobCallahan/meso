@@ -119,10 +119,7 @@ fn parse_cities(text: &str) -> Vec<City> {
             Ok(v) => v,
             Err(_) => continue,
         };
-        let pop = match parts[4].trim().parse::<u32>() {
-            Ok(v) => v,
-            Err(_) => 0,
-        };
+        let pop = parts[4].trim().parse::<u32>().unwrap_or_default();
         cities.push(City {
             name,
             state,

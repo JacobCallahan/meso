@@ -6,9 +6,7 @@
  */
 
 use gtk4::prelude::*;
-use gtk4::{
-    Box as GBox, Button, Label, Orientation, Separator, Window,
-};
+use gtk4::{Box as GBox, Button, Label, Orientation, Separator, Window};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -51,19 +49,16 @@ fn build_list(list_box: &GBox, subs: Rc<RefCell<Subscriptions>>) {
         list_box.append(&empty_label("No radar subscriptions."));
     } else {
         for (i, sub) in borrowed.radar.iter().enumerate() {
-            let row = subscription_row(
-                &format!("{} / {}", sub.station, sub.product),
-                {
-                    let subs_c = Rc::clone(&subs);
-                    let list_box_c = list_box.clone();
-                    let idx = i;
-                    move || {
-                        subs_c.borrow_mut().radar.remove(idx);
-                        let _ = save_subscriptions(&subs_c.borrow());
-                        build_list(&list_box_c, Rc::clone(&subs_c));
-                    }
-                },
-            );
+            let row = subscription_row(&format!("{} / {}", sub.station, sub.product), {
+                let subs_c = Rc::clone(&subs);
+                let list_box_c = list_box.clone();
+                let idx = i;
+                move || {
+                    subs_c.borrow_mut().radar.remove(idx);
+                    let _ = save_subscriptions(&subs_c.borrow());
+                    build_list(&list_box_c, Rc::clone(&subs_c));
+                }
+            });
             list_box.append(&row);
         }
     }
@@ -78,19 +73,16 @@ fn build_list(list_box: &GBox, subs: Rc<RefCell<Subscriptions>>) {
         list_box.append(&empty_label("No satellite subscriptions."));
     } else {
         for (i, sub) in borrowed.satellite.iter().enumerate() {
-            let row = subscription_row(
-                &format!("{} / {}", sub.sector, sub.band),
-                {
-                    let subs_c = Rc::clone(&subs);
-                    let list_box_c = list_box.clone();
-                    let idx = i;
-                    move || {
-                        subs_c.borrow_mut().satellite.remove(idx);
-                        let _ = save_subscriptions(&subs_c.borrow());
-                        build_list(&list_box_c, Rc::clone(&subs_c));
-                    }
-                },
-            );
+            let row = subscription_row(&format!("{} / {}", sub.sector, sub.band), {
+                let subs_c = Rc::clone(&subs);
+                let list_box_c = list_box.clone();
+                let idx = i;
+                move || {
+                    subs_c.borrow_mut().satellite.remove(idx);
+                    let _ = save_subscriptions(&subs_c.borrow());
+                    build_list(&list_box_c, Rc::clone(&subs_c));
+                }
+            });
             list_box.append(&row);
         }
     }

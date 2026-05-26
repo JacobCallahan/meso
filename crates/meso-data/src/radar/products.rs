@@ -3,7 +3,6 @@
 ///
 /// The TGFTP URL pattern is:
 ///   `https://tgftp.nws.noaa.gov/SL.us008001/DF.of/DC.radar/{dir}/SI.{prefix}{site}/sn.last`
-
 pub const TGFTP_BASE: &str = "https://tgftp.nws.noaa.gov";
 pub const NOMADS_L2_BASE: &str = "https://nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2/";
 pub const NWS_API_BASE: &str = "https://api.weather.gov";
@@ -238,17 +237,35 @@ impl RadarProduct {
     /// Returns a short scale/units description for the status bar.
     pub fn description_line(&self) -> &'static str {
         match self {
-            Self::L2Reflectivity | Self::N0Q | Self::N1Q | Self::N2Q | Self::N3Q
-            | Self::N0R | Self::N1R | Self::N2R | Self::N3R
-            | Self::NCR | Self::NCZ => "Reflectivity (dBZ): −32 to +94.5",
-            Self::L2Velocity | Self::N0U | Self::N1U | Self::N2U | Self::N3U
-            | Self::N0V | Self::N1V | Self::N2V | Self::N3V => "Velocity (kt): −128 to +127",
-            Self::N0S | Self::N1S | Self::N2S | Self::N3S => "Storm-Relative Velocity (kt): −128 to +127",
+            Self::L2Reflectivity
+            | Self::N0Q
+            | Self::N1Q
+            | Self::N2Q
+            | Self::N3Q
+            | Self::N0R
+            | Self::N1R
+            | Self::N2R
+            | Self::N3R
+            | Self::NCR
+            | Self::NCZ => "Reflectivity (dBZ): −32 to +94.5",
+            Self::L2Velocity
+            | Self::N0U
+            | Self::N1U
+            | Self::N2U
+            | Self::N3U
+            | Self::N0V
+            | Self::N1V
+            | Self::N2V
+            | Self::N3V => "Velocity (kt): −128 to +127",
+            Self::N0S | Self::N1S | Self::N2S | Self::N3S => {
+                "Storm-Relative Velocity (kt): −128 to +127"
+            }
             Self::N0X | Self::N1X | Self::N2X | Self::N3X => "ZDR (dB): −7.9 to +7.9",
             Self::N0C | Self::N1C | Self::N2C | Self::N3C => "Correlation Coefficient: 0.0 – 1.05",
             Self::N0K | Self::N1K | Self::N2K | Self::N3K => "KDP (°/km): −3 to +20",
-            Self::H0C | Self::H1C | Self::H2C | Self::H3C =>
-                "Hydrometeor Class: ND / Bio / AP / IC / DS / WS / RA / HR / BD / GR / HA",
+            Self::H0C | Self::H1C | Self::H2C | Self::H3C => {
+                "Hydrometeor Class: ND / Bio / AP / IC / DS / WS / RA / HR / BD / GR / HA"
+            }
             Self::DVL | Self::VIL => "Digital VIL (kg/m²): 0 – 75",
             Self::EET | Self::ET => "Echo Tops (kft): 0 – 70",
             Self::N1P | Self::DAA => "1-hr Precip (in): 0 – 8",
@@ -505,7 +522,14 @@ impl RadarProduct {
     pub fn is_map_supported(&self) -> bool {
         !matches!(
             self,
-            Self::N1P | Self::NTP | Self::DAA | Self::DSA | Self::HI | Self::STI | Self::TVS | Self::VWP
+            Self::N1P
+                | Self::NTP
+                | Self::DAA
+                | Self::DSA
+                | Self::HI
+                | Self::STI
+                | Self::TVS
+                | Self::VWP
         )
     }
 
@@ -513,17 +537,42 @@ impl RadarProduct {
     pub fn group_name(&self) -> &'static str {
         match self {
             Self::L2Reflectivity | Self::L2Velocity => "Level 2",
-            Self::N0Q | Self::N1Q | Self::N2Q | Self::N3Q
-            | Self::N0R | Self::N1R | Self::N2R | Self::N3R => "Base Reflectivity",
-            Self::N0U | Self::N1U | Self::N2U | Self::N3U
-            | Self::N0V | Self::N1V | Self::N2V | Self::N3V => "Base Velocity",
+            Self::N0Q
+            | Self::N1Q
+            | Self::N2Q
+            | Self::N3Q
+            | Self::N0R
+            | Self::N1R
+            | Self::N2R
+            | Self::N3R => "Base Reflectivity",
+            Self::N0U
+            | Self::N1U
+            | Self::N2U
+            | Self::N3U
+            | Self::N0V
+            | Self::N1V
+            | Self::N2V
+            | Self::N3V => "Base Velocity",
             Self::N0S | Self::N1S | Self::N2S | Self::N3S => "Storm-Relative Velocity",
-            Self::N0X | Self::N1X | Self::N2X | Self::N3X
-            | Self::N0C | Self::N1C | Self::N2C | Self::N3C
-            | Self::N0K | Self::N1K | Self::N2K | Self::N3K
-            | Self::H0C | Self::H1C | Self::H2C | Self::H3C => "Dual-pol",
-            Self::VIL | Self::DVL | Self::EET | Self::ET
-            | Self::NCR | Self::NCZ => "Derived / VIL / QPE",
+            Self::N0X
+            | Self::N1X
+            | Self::N2X
+            | Self::N3X
+            | Self::N0C
+            | Self::N1C
+            | Self::N2C
+            | Self::N3C
+            | Self::N0K
+            | Self::N1K
+            | Self::N2K
+            | Self::N3K
+            | Self::H0C
+            | Self::H1C
+            | Self::H2C
+            | Self::H3C => "Dual-pol",
+            Self::VIL | Self::DVL | Self::EET | Self::ET | Self::NCR | Self::NCZ => {
+                "Derived / VIL / QPE"
+            }
             _ => "Other",
         }
     }
@@ -533,26 +582,51 @@ impl RadarProduct {
         match group {
             "Level 2" => vec![Self::L2Reflectivity, Self::L2Velocity],
             "Base Reflectivity" => vec![
-                Self::N0Q, Self::N1Q, Self::N2Q, Self::N3Q,
-                Self::N0R, Self::N1R, Self::N2R, Self::N3R,
+                Self::N0Q,
+                Self::N1Q,
+                Self::N2Q,
+                Self::N3Q,
+                Self::N0R,
+                Self::N1R,
+                Self::N2R,
+                Self::N3R,
             ],
             "Base Velocity" => vec![
-                Self::N0U, Self::N1U, Self::N2U, Self::N3U,
-                Self::N0V, Self::N1V, Self::N2V, Self::N3V,
+                Self::N0U,
+                Self::N1U,
+                Self::N2U,
+                Self::N3U,
+                Self::N0V,
+                Self::N1V,
+                Self::N2V,
+                Self::N3V,
             ],
-            "Storm-Relative Velocity" => vec![
-                Self::N0S, Self::N1S, Self::N2S, Self::N3S,
-            ],
+            "Storm-Relative Velocity" => vec![Self::N0S, Self::N1S, Self::N2S, Self::N3S],
             "Dual-pol" => vec![
-                Self::N0X, Self::N1X, Self::N2X, Self::N3X,
-                Self::N0C, Self::N1C, Self::N2C, Self::N3C,
-                Self::N0K, Self::N1K, Self::N2K, Self::N3K,
-                Self::H0C, Self::H1C, Self::H2C, Self::H3C,
+                Self::N0X,
+                Self::N1X,
+                Self::N2X,
+                Self::N3X,
+                Self::N0C,
+                Self::N1C,
+                Self::N2C,
+                Self::N3C,
+                Self::N0K,
+                Self::N1K,
+                Self::N2K,
+                Self::N3K,
+                Self::H0C,
+                Self::H1C,
+                Self::H2C,
+                Self::H3C,
             ],
             "Derived / VIL / QPE" => vec![
-                Self::NCR, Self::NCZ,
-                Self::DVL, Self::VIL,
-                Self::EET, Self::ET,
+                Self::NCR,
+                Self::NCZ,
+                Self::DVL,
+                Self::VIL,
+                Self::EET,
+                Self::ET,
             ],
             _ => Vec::new(),
         }
@@ -567,4 +641,88 @@ impl RadarProduct {
         "Dual-pol",
         "Derived / VIL / QPE",
     ];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_code_roundtrip() {
+        for product in RadarProduct::all_products() {
+            let code = product.code();
+            assert_eq!(
+                RadarProduct::from_code(code),
+                Some(product),
+                "from_code({code}) round-trip failed"
+            );
+        }
+    }
+
+    #[test]
+    fn from_code_unknown_returns_none() {
+        assert_eq!(RadarProduct::from_code("BOGUS"), None);
+        assert_eq!(RadarProduct::from_code(""), None);
+    }
+
+    #[test]
+    fn is_level2_flags() {
+        assert!(RadarProduct::L2Reflectivity.is_level2());
+        assert!(RadarProduct::L2Velocity.is_level2());
+        assert!(!RadarProduct::N0Q.is_level2());
+        assert!(!RadarProduct::N0U.is_level2());
+    }
+
+    #[test]
+    fn tgftp_dir_level3_has_value() {
+        assert!(RadarProduct::N0Q.tgftp_dir().is_some());
+        assert!(RadarProduct::N0U.tgftp_dir().is_some());
+        assert!(RadarProduct::NCR.tgftp_dir().is_some());
+    }
+
+    #[test]
+    fn tgftp_dir_level2_is_none() {
+        assert!(RadarProduct::L2Reflectivity.tgftp_dir().is_none());
+        assert!(RadarProduct::L2Velocity.tgftp_dir().is_none());
+    }
+
+    #[test]
+    fn is_velocity_covers_velocity_products() {
+        for p in [
+            RadarProduct::N0U,
+            RadarProduct::N0V,
+            RadarProduct::N0S,
+            RadarProduct::L2Velocity,
+        ] {
+            assert!(p.is_velocity(), "{p:?} should be velocity");
+        }
+        for p in [
+            RadarProduct::N0Q,
+            RadarProduct::L2Reflectivity,
+            RadarProduct::NCR,
+        ] {
+            assert!(!p.is_velocity(), "{p:?} should not be velocity");
+        }
+    }
+
+    #[test]
+    fn for_group_level2_returns_two_products() {
+        let group = RadarProduct::for_group("Level 2");
+        assert_eq!(group.len(), 2);
+        assert!(group.contains(&RadarProduct::L2Reflectivity));
+        assert!(group.contains(&RadarProduct::L2Velocity));
+    }
+
+    #[test]
+    fn for_group_unknown_is_empty() {
+        assert!(RadarProduct::for_group("Nonexistent").is_empty());
+    }
+
+    #[test]
+    fn all_products_non_empty_and_has_l2() {
+        let all = RadarProduct::all_products();
+        assert!(!all.is_empty());
+        assert!(all.contains(&RadarProduct::L2Reflectivity));
+        assert!(all.contains(&RadarProduct::N0Q));
+    }
 }

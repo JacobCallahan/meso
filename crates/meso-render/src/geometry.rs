@@ -33,7 +33,7 @@ pub struct ColorVertex {
 ///   0─1
 ///   │/│
 ///   3─2
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct QuadBuffer {
     /// Packed f32 positions: [x0,y0, x1,y1, x2,y2, x3,y3, ...] per quad.
     pub positions: Vec<f32>,
@@ -122,7 +122,6 @@ pub fn level2_to_quads(
         let sin1 = az1.to_radians().sin();
 
         let bins = &data.bins[r * NUM_RANGE_BINS..(r + 1) * NUM_RANGE_BINS];
-        let num_bins = NUM_RANGE_BINS;
 
         // Run-length encode identical gate values
         let mut run_start_km = black_hole;
@@ -131,8 +130,7 @@ pub fn level2_to_quads(
 
         let bin_start_index = (black_hole / bin_size).ceil() as usize;
 
-        for b in bin_start_index..num_bins {
-            let level = bins[b];
+        for (b, &level) in bins.iter().enumerate().skip(bin_start_index) {
             if level == run_level {
                 run_count += 1;
             } else {
@@ -147,7 +145,6 @@ pub fn level2_to_quads(
                 run_count = 1;
             }
         }
-        // Final run
         if run_count > 0 && run_level != 0 {
             let r0 = run_start_km;
             let r1 = r0 + run_count as f64 * bin_size;
@@ -205,8 +202,7 @@ pub fn level3_to_quads(
         };
         let mut run_count = 0usize;
 
-        for b in bin_start_index..num_bins {
-            let level = bins[b];
+        for (b, &level) in bins.iter().enumerate().skip(bin_start_index) {
             if level == run_level {
                 run_count += 1;
             } else {
@@ -284,8 +280,8 @@ fn level3_raster_to_quads(
     buf
 }
 
-/// Emit a single radial quad into the buffer, converting from km to screen pixels.
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn emit_quad_km(
     buf: &mut QuadBuffer,
     r0: f64,
@@ -326,4 +322,35 @@ pub fn warning_to_lines(polygon: &[LatLon], viewport: &Viewport) -> Vec<(f32, f3
             (x as f32, y as f32)
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quad_buffer_new_is_empty() {
+        let buf = QuadBuffer::new();
+        assert_eq!(buf.quad_count, 0);
+        assert!(buf.positions.is_empty());
+        assert!(buf.colors.is_empty());
+    }
+
+    #[test]
+    fn quad_buffer_with_capacity_starts_empty_but_preallocated() {
+        let buf = QuadBuffer::with_capacity(100);
+        assert_eq!(buf.quad_count, 0);
+        // Capacity should be at least 100*8 = 800 for positions.
+        assert!(buf.positions.capacity() >= 800);
+        // Capacity should be at least 100*12 = 1200 for colors.
+        assert!(buf.colors.capacity() >= 1200);
+    }
+
+    #[test]
+    fn quad_buffer_new_starts_with_zero_quads() {
+        let buf = QuadBuffer::new();
+        assert_eq!(buf.quad_count, 0);
+        assert!(buf.positions.is_empty());
+        assert!(buf.colors.is_empty());
+    }
 }

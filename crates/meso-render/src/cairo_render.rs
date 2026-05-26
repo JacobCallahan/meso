@@ -136,8 +136,6 @@ fn render_quads_cairo(
                     lon: cell.lon as f64,
                 };
                 let (cx, cy) = viewport.latlon_to_screen(&ll);
-                let cx = cx as f64;
-                let cy = cy as f64;
 
                 // The STI bearing is a FROM-direction (met convention); add 180° to get
                 // the actual direction of motion.
@@ -149,12 +147,18 @@ fn render_quads_cairo(
 
                 // Main vector line: current position → 60-min position
                 let (end_lat, end_lon) = meso_data::storm_tracks::bearing_point(
-                    ll.lat, ll.lon, motion_bearing, speed_kt * 1852.0,
+                    ll.lat,
+                    ll.lon,
+                    motion_bearing,
+                    speed_kt * 1852.0,
                 );
-                let end_ll = meso_data::geo::latlon::LatLon { lat: end_lat, lon: end_lon };
+                let end_ll = meso_data::geo::latlon::LatLon {
+                    lat: end_lat,
+                    lon: end_lon,
+                };
                 let (ex, ey) = viewport.latlon_to_screen(&end_ll);
                 ctx.move_to(cx, cy);
-                ctx.line_to(ex as f64, ey as f64);
+                ctx.line_to(ex, ey);
                 let _ = ctx.stroke();
 
                 // Cell dot
@@ -167,8 +171,8 @@ fn render_quads_cairo(
                     let rev = (motion_bearing + 180.0).to_radians();
                     for off in [-25.0_f64, 25.0] {
                         let a = rev + off.to_radians();
-                        ctx.move_to(ex as f64, ey as f64);
-                        ctx.line_to(ex as f64 + a.sin() * head_len, ey as f64 - a.cos() * head_len);
+                        ctx.move_to(ex, ey);
+                        ctx.line_to(ex + a.sin() * head_len, ey - a.cos() * head_len);
                         let _ = ctx.stroke();
                     }
                 }
@@ -177,11 +181,17 @@ fn render_quads_cairo(
                 for &frac in &[0.25_f64, 0.50, 0.75] {
                     let dist = speed_kt * 1852.0 * frac;
                     let (tlat, tlon) = meso_data::storm_tracks::bearing_point(
-                        ll.lat, ll.lon, motion_bearing, dist,
+                        ll.lat,
+                        ll.lon,
+                        motion_bearing,
+                        dist,
                     );
-                    let tick_ll = meso_data::geo::latlon::LatLon { lat: tlat, lon: tlon };
+                    let tick_ll = meso_data::geo::latlon::LatLon {
+                        lat: tlat,
+                        lon: tlon,
+                    };
                     let (tx, ty) = viewport.latlon_to_screen(&tick_ll);
-                    ctx.arc(tx as f64, ty as f64, 2.5, 0.0, std::f64::consts::TAU);
+                    ctx.arc(tx, ty, 2.5, 0.0, std::f64::consts::TAU);
                     let _ = ctx.fill();
                 }
 

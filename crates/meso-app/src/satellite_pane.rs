@@ -13,7 +13,6 @@
  */
 
 use gdk_pixbuf::Pixbuf;
-use glib;
 use gtk4::prelude::*;
 use gtk4::{
     Box as GBox, Button, DrawingArea, DropDown, Label, Orientation, Overlay, Scale, SpinButton,
@@ -86,7 +85,10 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
     let sector_labels: Vec<&str> = SECTORS.iter().map(|s| s.name).collect();
     let sector_combo = DropDown::from_strings(&sector_labels);
     let current_sector = state.borrow().sector.clone();
-    let sector_active = SECTORS.iter().position(|s| s.code == current_sector).unwrap_or(0);
+    let sector_active = SECTORS
+        .iter()
+        .position(|s| s.code == current_sector)
+        .unwrap_or(0);
     sector_combo.set_selected(sector_active as u32);
     sector_combo.set_tooltip_text(Some("Select GOES satellite sector"));
     toolbar.append(&sector_combo);
@@ -94,7 +96,10 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
     // Band selector
     let band_combo = DropDown::from_strings(BAND_LABELS);
     let current_band = state.borrow().band.clone();
-    let band_active = BAND_CODES.iter().position(|&c| c == current_band).unwrap_or(0);
+    let band_active = BAND_CODES
+        .iter()
+        .position(|&c| c == current_band)
+        .unwrap_or(0);
     band_combo.set_selected(band_active as u32);
     band_combo.set_tooltip_text(Some("Select ABI spectral band"));
     toolbar.append(&band_combo);
@@ -548,11 +553,21 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
 
         // Initial state
         {
-            let sector = SECTORS.get(sector_c.selected() as usize).map(|s| s.code.to_string()).unwrap_or_default();
-            let band = BAND_CODES.get(band_c.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
+            let sector = SECTORS
+                .get(sector_c.selected() as usize)
+                .map(|s| s.code.to_string())
+                .unwrap_or_default();
+            let band = BAND_CODES
+                .get(band_c.selected() as usize)
+                .map(|&s| s.to_string())
+                .unwrap_or_default();
             if !sector.is_empty() && !band.is_empty() {
                 let subs = load_subscriptions();
-                btn.set_label(if subs.is_sat_subscribed(&sector, &band) { "🔵" } else { "⚫" });
+                btn.set_label(if subs.is_sat_subscribed(&sector, &band) {
+                    "🔵"
+                } else {
+                    "⚫"
+                });
             }
         }
 
@@ -561,11 +576,21 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
             let band_c2 = band_combo.clone();
             let btn2 = subscribe_btn.clone();
             sector_combo.connect_selected_notify(move |combo| {
-                let sector = SECTORS.get(combo.selected() as usize).map(|s| s.code.to_string()).unwrap_or_default();
-                let band = BAND_CODES.get(band_c2.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
+                let sector = SECTORS
+                    .get(combo.selected() as usize)
+                    .map(|s| s.code.to_string())
+                    .unwrap_or_default();
+                let band = BAND_CODES
+                    .get(band_c2.selected() as usize)
+                    .map(|&s| s.to_string())
+                    .unwrap_or_default();
                 if !sector.is_empty() && !band.is_empty() {
                     let subs = load_subscriptions();
-                    btn2.set_label(if subs.is_sat_subscribed(&sector, &band) { "🔵" } else { "⚫" });
+                    btn2.set_label(if subs.is_sat_subscribed(&sector, &band) {
+                        "🔵"
+                    } else {
+                        "⚫"
+                    });
                 }
             });
         }
@@ -575,19 +600,35 @@ pub fn build_satellite_pane(shared_cfg: Rc<RefCell<Config>>) -> GBox {
             let sector_c3 = sector_combo.clone();
             let btn3 = subscribe_btn.clone();
             band_combo.connect_selected_notify(move |combo| {
-                let sector = SECTORS.get(sector_c3.selected() as usize).map(|s| s.code.to_string()).unwrap_or_default();
-                let band = BAND_CODES.get(combo.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
+                let sector = SECTORS
+                    .get(sector_c3.selected() as usize)
+                    .map(|s| s.code.to_string())
+                    .unwrap_or_default();
+                let band = BAND_CODES
+                    .get(combo.selected() as usize)
+                    .map(|&s| s.to_string())
+                    .unwrap_or_default();
                 if !sector.is_empty() && !band.is_empty() {
                     let subs = load_subscriptions();
-                    btn3.set_label(if subs.is_sat_subscribed(&sector, &band) { "🔵" } else { "⚫" });
+                    btn3.set_label(if subs.is_sat_subscribed(&sector, &band) {
+                        "🔵"
+                    } else {
+                        "⚫"
+                    });
                 }
             });
         }
 
         // Toggle on click
         subscribe_btn.connect_clicked(move |_| {
-            let sector = SECTORS.get(sector_c.selected() as usize).map(|s| s.code.to_string()).unwrap_or_default();
-            let band = BAND_CODES.get(band_c.selected() as usize).map(|&s| s.to_string()).unwrap_or_default();
+            let sector = SECTORS
+                .get(sector_c.selected() as usize)
+                .map(|s| s.code.to_string())
+                .unwrap_or_default();
+            let band = BAND_CODES
+                .get(band_c.selected() as usize)
+                .map(|&s| s.to_string())
+                .unwrap_or_default();
             if sector.is_empty() || band.is_empty() {
                 return;
             }

@@ -411,7 +411,7 @@ pub fn image_url(sector_code: &str, band: &str) -> String {
     let band_local = if band == "GLM" { "EXTENT3" } else { band };
 
     let filename = if size == "latest" {
-        format!("latest.jpg")
+        "latest.jpg".to_string()
     } else {
         format!("{size}.jpg")
     };

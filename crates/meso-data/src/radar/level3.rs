@@ -29,11 +29,11 @@ pub fn bin_size_for_product(product_code: u16) -> f32 {
     match product_code {
         94 | 99 => 1.852, // N0Q / N0U legacy TGFTP format: 460 bins × 1 nm
         134 | 135 => 2.0,
-        37 => 2.0, // NCR raster
+        37 => 2.0,           // NCR raster
         38 | 41 | 57 => 8.0, // NCZ / ET / VIL raster
         186 => 0.590022,
         159 | 161 | 163 | 165 | 170 | 172 => 0.50,
-        180 | 181 | 182 => 0.295011,
+        180..=182 => 0.295011,
         78 | 80 => 4.0,
         153 | 154 | 2153 | 2154 => 0.50,
         _ => 1.852,
@@ -293,8 +293,8 @@ fn decode_radials(
 
         let bin_slice = &mut bins[r * num_bins..(r + 1) * num_bins];
         let read_count = num_halfwords.min(num_bins);
-        for b in 0..read_count {
-            bin_slice[b] = cursor.read_u8()?;
+        for slot in bin_slice.iter_mut().take(read_count) {
+            *slot = cursor.read_u8()?;
         }
 
         // Skip extra bytes if num_halfwords > num_bins to keep stream aligned.
@@ -358,7 +358,11 @@ fn decode_radials_4bit_rle(
             let run = (packed >> 4) as usize;
             let level = packed & 0x0F;
             // Expand 4-bit class level into 8-bit space for palette lookup.
-            let gate = if level == 0 { 0 } else { level.saturating_mul(17) };
+            let gate = if level == 0 {
+                0
+            } else {
+                level.saturating_mul(17)
+            };
             for _ in 0..run {
                 if col < num_bins {
                     row[col] = gate;
@@ -385,7 +389,11 @@ fn decode_radials_4bit_rle(
 }
 
 /// Decode 4-bit run-length encoded raster packet (0xBA07).
-fn decode_raster(cursor: &mut Cursor<&[u8]>, hdr: &NidsHeader, bin_size: f32) -> Result<Level3Data> {
+fn decode_raster(
+    cursor: &mut Cursor<&[u8]>,
+    hdr: &NidsHeader,
+    bin_size: f32,
+) -> Result<Level3Data> {
     anyhow::ensure!(
         hdr.packet_code == 0xBA07,
         "decode_raster called for non-raster packet {:#06x}",
@@ -405,7 +413,11 @@ fn decode_raster(cursor: &mut Cursor<&[u8]>, hdr: &NidsHeader, bin_size: f32) ->
             let level = packed & 0x0F;
             // BA07 raster products are 4-bit class levels. Expand to 8-bit gate
             // space so the existing 0..255 palettes apply correctly.
-            let gate = if level == 0 { 0 } else { level.saturating_mul(17) };
+            let gate = if level == 0 {
+                0
+            } else {
+                level.saturating_mul(17)
+            };
             for _ in 0..run {
                 if col >= cols {
                     break;
@@ -480,8 +492,7 @@ pub fn generate_radial_geometry(
         let mut level_count = 0usize;
         let mut bin_start = black_hole_start;
 
-        for b in 0..data.num_range_bins {
-            let cur_level = bin_slice[b];
+        for (b, &cur_level) in bin_slice.iter().enumerate() {
             if cur_level == level {
                 level_count += 1;
             } else {
@@ -529,6 +540,7 @@ pub fn generate_radial_geometry(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn emit_quad(
     vertices: &mut Vec<f32>,
     colors: &mut Vec<u8>,
@@ -566,4 +578,42 @@ fn emit_quad(
         colors.push(cb);
     }
     *count += 1;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bin_size_legacy_reflectivity_and_velocity() {
+        // Product codes 94 (N0Q) and 99 (N0U) use 1 nautical mile bins.
+        assert_eq!(bin_size_for_product(94), 1.852);
+        assert_eq!(bin_size_for_product(99), 1.852);
+    }
+
+    #[test]
+    fn bin_size_raster_products() {
+        assert_eq!(bin_size_for_product(37), 2.0); // NCR
+        assert_eq!(bin_size_for_product(38), 8.0); // NCZ
+        assert_eq!(bin_size_for_product(57), 8.0); // VIL
+    }
+
+    #[test]
+    fn bin_size_super_res_products() {
+        assert_eq!(bin_size_for_product(186), 0.590022); // N0B (super-res ref)
+        assert_eq!(bin_size_for_product(159), 0.50); // dual-pol
+        assert_eq!(bin_size_for_product(180), 0.295011); // TAB
+    }
+
+    #[test]
+    fn bin_size_qpe() {
+        assert_eq!(bin_size_for_product(78), 4.0);
+        assert_eq!(bin_size_for_product(80), 4.0);
+    }
+
+    #[test]
+    fn bin_size_unknown_falls_back_to_default() {
+        assert_eq!(bin_size_for_product(0), 1.852);
+        assert_eq!(bin_size_for_product(999), 1.852);
+    }
 }

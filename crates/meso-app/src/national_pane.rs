@@ -8,7 +8,6 @@
  * Products: WPC Surface, WPC Forecast Maps, WPC QPF, NHC Tropical, Upper Air
  */
 
-use glib;
 use gtk4::prelude::*;
 use gtk4::{
     Box as GBox, Button, CellRendererText, DrawingArea, Label, Orientation, PolicyType,
@@ -138,8 +137,7 @@ pub fn build_national_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
     {
         let state_z = Rc::clone(&state);
         let da_z = drawing_area.clone();
-        let scroll =
-            gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
+        let scroll = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
         scroll.connect_scroll(move |_, _dx, dy| {
             let factor = if dy < 0.0 { 1.15 } else { 1.0 / 1.15 };
             zoom_around(&mut state_z.borrow_mut(), factor, &da_z);
@@ -176,8 +174,7 @@ pub fn build_national_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
                     .as_ref()
                     .map(|pb| (pb.width() as f64, pb.height() as f64))
                     .unwrap_or((1.0, 1.0));
-                let fit =
-                    (da_c.width() as f64 / pb_size.0).min(da_c.height() as f64 / pb_size.1);
+                let fit = (da_c.width() as f64 / pb_size.0).min(da_c.height() as f64 / pb_size.1);
                 let scale = fit * st_c.borrow().zoom;
                 let mut st = st_c.borrow_mut();
                 st.pan_x = origin_x - ox / scale;

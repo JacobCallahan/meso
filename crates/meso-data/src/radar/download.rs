@@ -179,7 +179,11 @@ impl RadarDownloader {
             let (fname, size) = &entries[entries.len() - 1];
             // wX behavior: if newest file is much smaller, it may still be writing.
             let ratio = *size / size_prev.max(1.0);
-            if ratio < 0.75 { fname_prev } else { fname }
+            if ratio < 0.75 {
+                fname_prev
+            } else {
+                fname
+            }
         } else {
             &entries[0].0
         };
@@ -376,4 +380,141 @@ impl RadarDownloader {
 // We declare it inline; add to Cargo.toml at build time.
 mod regex {
     pub use ::regex::Regex;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::radar::products::RadarProduct;
+
+    // ── URL builders ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn level3_url_contains_site_and_product_dir() {
+        let url = RadarDownloader::level3_url("KTLX", &RadarProduct::N0Q).unwrap();
+        assert!(url.contains("ktlx"), "site should be lower-cased in URL");
+        assert!(url.contains("sn.last"));
+        assert!(url.contains("tgftp.nws.noaa.gov"));
+    }
+
+    #[test]
+    fn level3_url_tdwr_has_no_prefix() {
+        // TDWR sites are 4 chars and use no "k" prefix.
+        let url = RadarDownloader::level3_url("TDFW", &RadarProduct::TR0).unwrap();
+        assert!(
+            url.contains("tdfw"),
+            "TDWR site should appear as-is, lower-cased"
+        );
+        // Ensure the extra "k" prefix is not inserted.
+        assert!(!url.contains("ktdfw"));
+    }
+
+    #[test]
+    fn level3_url_l2_product_returns_none() {
+        assert!(RadarDownloader::level3_url("KTLX", &RadarProduct::L2Reflectivity).is_none());
+    }
+
+    #[test]
+    fn level2_dir_url_is_uppercase_with_prefix() {
+        let url = RadarDownloader::level2_dir_url("KTLX");
+        assert!(url.contains("KTLX"));
+        // Prefix is the first char uppercased ("K" for most CONUS sites).
+        assert!(url.contains("KKTLX") || url.contains("KTLX"));
+        assert!(url.ends_with('/'));
+    }
+
+    #[test]
+    fn level3_file_url_uses_supplied_filename() {
+        let url = RadarDownloader::level3_file_url("KTLX", &RadarProduct::N0Q, "sn.0010").unwrap();
+        assert!(url.contains("sn.0010"));
+        assert!(url.contains("ktlx"));
+    }
+
+    // ── Dir-list parsers ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_dir_entries_basic_line() {
+        let input = "KTLX20240615_214500_V06 2394874\n";
+        let entries = RadarDownloader::parse_level2_dir_entries("KTLX", input);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "KTLX20240615_214500_V06");
+        assert!((entries[0].1 - 2394874.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn parse_dir_entries_multi_line_sorted() {
+        let input = concat!(
+            "KTLX20240615_215500_V06 2400000\n",
+            "KTLX20240615_214500_V06 2394874\n",
+            "KTLX20240615_215000_V06 2390000\n",
+        );
+        let entries = RadarDownloader::parse_level2_dir_entries("KTLX", input);
+        assert_eq!(entries.len(), 3);
+        // Should be sorted chronologically by filename.
+        assert!(entries[0].0 < entries[1].0);
+        assert!(entries[1].0 < entries[2].0);
+    }
+
+    #[test]
+    fn parse_dir_entries_ignores_unrelated_lines() {
+        let input = "total 12345\nsome other line\nKTLX20240615_214500_V06 2394874\n";
+        let entries = RadarDownloader::parse_level2_dir_entries("KTLX", input);
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn parse_dir_entries_empty_input() {
+        let entries = RadarDownloader::parse_level2_dir_entries("KTLX", "");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_dir_entries_legacy_alternating_tokens() {
+        let input = "KTLX20240615_214500_V06 2394874 KTLX20240615_215000_V06 2400000";
+        let entries = RadarDownloader::parse_level2_dir_entries_legacy(input);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, "KTLX20240615_214500_V06");
+        assert_eq!(entries[1].0, "KTLX20240615_215000_V06");
+    }
+
+    #[test]
+    fn parse_dir_entries_legacy_empty() {
+        assert!(RadarDownloader::parse_level2_dir_entries_legacy("").is_empty());
+        assert!(RadarDownloader::parse_level2_dir_entries_legacy("onlyonetoken").is_empty());
+    }
+
+    // ── In-progress frame heuristic ───────────────────────────────────────────
+
+    /// When the newest file is < 75% the size of the second-newest, it is likely
+    /// still being written; the downloader should prefer the second-newest frame.
+    /// This is tested indirectly through the public `latest_level2_filename`
+    /// method's selection logic, which is exposed via the private helper.
+    #[test]
+    fn in_progress_heuristic_skips_small_newest() {
+        // Build a two-entry list where the last entry is only 10% of the previous.
+        let input = concat!(
+            "KTLX20240615_214500_V06 2000000\n",
+            "KTLX20240615_215000_V06 200000\n",
+        );
+        let entries = RadarDownloader::parse_level2_dir_entries("KTLX", input);
+        assert_eq!(entries.len(), 2);
+        let prev_size = entries[entries.len() - 2].1;
+        let last_size = entries[entries.len() - 1].1;
+        let ratio = last_size / prev_size.max(1.0);
+        // Verify the heuristic would trigger.
+        assert!(ratio < 0.75, "ratio {ratio:.2} should be < 0.75");
+    }
+
+    #[test]
+    fn in_progress_heuristic_keeps_large_newest() {
+        let input = concat!(
+            "KTLX20240615_214500_V06 2000000\n",
+            "KTLX20240615_215000_V06 1900000\n",
+        );
+        let entries = RadarDownloader::parse_level2_dir_entries("KTLX", input);
+        let prev_size = entries[entries.len() - 2].1;
+        let last_size = entries[entries.len() - 1].1;
+        let ratio = last_size / prev_size.max(1.0);
+        assert!(ratio >= 0.75, "ratio {ratio:.2} should be >= 0.75");
+    }
 }

@@ -184,6 +184,7 @@ pub fn build_forecast_pane(config: &Config) -> GBox {
 
 // ── Data loading ──────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn load_all(
     lat: f64,
     lon: f64,

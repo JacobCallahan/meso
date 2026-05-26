@@ -55,9 +55,7 @@ pub fn build_spc_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
 
     // Mesoanalysis controls
     let meso_refresh_btn = Button::with_label("⟳");
-    let meso_model = StringList::new(
-        &MESO_PRODUCTS.iter().map(|p| p.label).collect::<Vec<_>>(),
-    );
+    let meso_model = StringList::new(&MESO_PRODUCTS.iter().map(|p| p.label).collect::<Vec<_>>());
     let meso_combo = DropDown::new(Some(meso_model), gtk4::Expression::NONE);
     meso_combo.set_selected(0);
     meso_combo.set_hexpand(false);
@@ -391,12 +389,7 @@ pub fn build_spc_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
 
 // ── Mesoanalysis loading ──────────────────────────────────────────────────────
 
-fn load_meso(
-    state: Rc<RefCell<SpcState>>,
-    da: gtk4::DrawingArea,
-    status: Label,
-    combo: DropDown,
-) {
+fn load_meso(state: Rc<RefCell<SpcState>>, da: gtk4::DrawingArea, status: Label, combo: DropDown) {
     let product_id = state.borrow().meso_product.clone();
     let product_label = MESO_PRODUCTS
         .iter()

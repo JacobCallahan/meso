@@ -90,12 +90,7 @@ pub fn decompress_level2(compressed: &[u8]) -> Result<Vec<u8>> {
     let mut cursor = Cursor::new(compressed);
     cursor.seek(SeekFrom::Start(FILE_HEADER_SIZE))?;
 
-    loop {
-        // Each block starts with a signed i32 big-endian block size.
-        let block_size = match cursor.read_i32::<BigEndian>() {
-            Ok(v) => v,
-            Err(_) => break,
-        };
+    while let Ok(block_size) = cursor.read_i32::<BigEndian>() {
         let block_len = block_size.unsigned_abs() as usize;
         if block_len == 0 {
             break;
@@ -178,7 +173,10 @@ pub fn decode(data: &[u8], velocity: bool, tilt_idx: usize) -> Result<Level2Data
 
     let all_records = if velocity { &records_vel } else { &records_ref };
     if all_records.is_empty() {
-        bail!("No {} records found", if velocity { "velocity" } else { "reflectivity" });
+        bail!(
+            "No {} records found",
+            if velocity { "velocity" } else { "reflectivity" }
+        );
     }
 
     // Group records by elevation_num, preserving scan order

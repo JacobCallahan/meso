@@ -142,9 +142,8 @@ impl ColorPalette {
         for g in 0..entries[0].0 {
             table[g as usize] = entries[0].1;
         }
-        for g in (entries[n - 1].0 as usize + 1)..256 {
-            table[g] = entries[n - 1].1;
-        }
+        let last_color = entries[n - 1].1;
+        table[(entries[n - 1].0 as usize + 1)..].fill(last_color);
 
         Ok(ColorPalette { table })
     }
@@ -230,15 +229,15 @@ impl PaletteRegistry {
             // 56=N0S SR-vel family, 25/81/82 legacy vel
             25 | 27 | 28 | 29 | 30 | 55 | 56 | 81 | 82 | 99 | 182 | 186 => self.get("velocity"),
             // ZDR (differential reflectivity): codes 159–162
-            159 | 160 | 161 | 162 => self.get("zdr"),
+            159..=162 => self.get("zdr"),
             // Correlation Coefficient: codes 161–164
             // Note: 161/162 overlap with ZDR above; ZDR arm wins for those codes.
             // In practice N0C=163, N1C=164, N2C=165, N3C=166 per wX/NEXRAD ICD.
             163 | 164 => self.get("correlation"),
             // KDP: codes 108–111
-            108 | 109 | 110 | 111 => self.get("kdp"),
+            108..=111 => self.get("kdp"),
             // HCA: codes 165–168
-            165 | 166 | 167 | 168 => self.get("hca"),
+            165..=168 => self.get("hca"),
             // VIL: 57=VIL, 134=DVL (digital VIL)
             57 | 134 => self.get("vil"),
             // Echo Tops: 41=ET, 135=EET
@@ -294,28 +293,28 @@ fn build_hca_palette() -> ColorPalette {
     // Categorical: step palette for HCA class indices 0–10.
     // Classes: 0=ND, 1=Bio, 2=AP/GC, 3=IC, 4=DS, 5=WS, 6=RA, 7=HR, 8=BD, 9=GR, 10=HA
     let points: &[(u8, u8, u8, u8)] = &[
-        (0,   0,   0,   0),    // 0 = ND (transparent/black)
-        (23,  0,   0,   0),
-        (24,  0,  160,   0),   // 1 = Biological (dark green)
-        (47,  0,  160,   0),
-        (48,  139,  90,  43),  // 2 = AP/Ground Clutter (brown)
-        (71,  139,  90,  43),
-        (72,  180, 210, 255),  // 3 = Ice Crystals (light blue)
-        (95,  180, 210, 255),
-        (96,  240, 240, 240),  // 4 = Dry Snow (white)
+        (0, 0, 0, 0), // 0 = ND (transparent/black)
+        (23, 0, 0, 0),
+        (24, 0, 160, 0), // 1 = Biological (dark green)
+        (47, 0, 160, 0),
+        (48, 139, 90, 43), // 2 = AP/Ground Clutter (brown)
+        (71, 139, 90, 43),
+        (72, 180, 210, 255), // 3 = Ice Crystals (light blue)
+        (95, 180, 210, 255),
+        (96, 240, 240, 240), // 4 = Dry Snow (white)
         (119, 240, 240, 240),
-        (120, 0,   220, 220),  // 5 = Wet Snow (cyan)
-        (143, 0,   220, 220),
-        (144, 0,   200,   0),  // 6 = Rain (green)
-        (167, 0,   200,   0),
-        (168, 255, 220,   0),  // 7 = Heavy Rain (yellow)
-        (191, 255, 220,   0),
-        (192, 255, 140,   0),  // 8 = Big Drops (orange)
-        (215, 255, 140,   0),
-        (216,   0, 255, 100),  // 9 = Graupel (lime)
-        (239,   0, 255, 100),
-        (240, 255,   0,   0),  // 10 = Hail/Rain mix (red)
-        (255, 255,   0,   0),
+        (120, 0, 220, 220), // 5 = Wet Snow (cyan)
+        (143, 0, 220, 220),
+        (144, 0, 200, 0), // 6 = Rain (green)
+        (167, 0, 200, 0),
+        (168, 255, 220, 0), // 7 = Heavy Rain (yellow)
+        (191, 255, 220, 0),
+        (192, 255, 140, 0), // 8 = Big Drops (orange)
+        (215, 255, 140, 0),
+        (216, 0, 255, 100), // 9 = Graupel (lime)
+        (239, 0, 255, 100),
+        (240, 255, 0, 0), // 10 = Hail/Rain mix (red)
+        (255, 255, 0, 0),
     ];
     ColorPalette::from_control_points(points)
 }
@@ -323,15 +322,15 @@ fn build_hca_palette() -> ColorPalette {
 fn build_echo_tops_palette() -> ColorPalette {
     // Height gradient: 0–70 kft
     let points: &[(u8, u8, u8, u8)] = &[
-        (0,     0,   0,   0),   // 0 kft = transparent
-        (10,   80,   0, 120),   // ~7 kft = dark purple
-        (50,    0,   0, 200),   // ~28 kft = blue
-        (100,   0, 180, 220),   // ~56 kft = cyan
-        (140,   0, 220,   0),   // ~78 kft = green
-        (180, 220, 220,   0),   // ~100 kft = yellow
-        (215, 255, 140,   0),   // ~120 kft = orange
-        (240, 255,   0,   0),   // ~135 kft = red
-        (255, 255, 200, 255),   // max = pink/white
+        (0, 0, 0, 0),         // 0 kft = transparent
+        (10, 80, 0, 120),     // ~7 kft = dark purple
+        (50, 0, 0, 200),      // ~28 kft = blue
+        (100, 0, 180, 220),   // ~56 kft = cyan
+        (140, 0, 220, 0),     // ~78 kft = green
+        (180, 220, 220, 0),   // ~100 kft = yellow
+        (215, 255, 140, 0),   // ~120 kft = orange
+        (240, 255, 0, 0),     // ~135 kft = red
+        (255, 255, 200, 255), // max = pink/white
     ];
     ColorPalette::from_control_points(points)
 }
@@ -339,14 +338,14 @@ fn build_echo_tops_palette() -> ColorPalette {
 fn build_vil_palette() -> ColorPalette {
     // VIL intensity: 0–75 kg/m²
     let points: &[(u8, u8, u8, u8)] = &[
-        (0,     0,   0,   0),   // 0 = transparent
-        (5,     0,   0, 200),   // trace = blue
-        (30,    0, 200,   0),   // low = green
-        (80,  200, 200,   0),   // moderate = yellow
-        (130, 255, 140,   0),   // high = orange
-        (180, 255,   0,   0),   // very high = red
-        (210, 180,   0, 220),   // extreme = purple
-        (240, 255, 255, 255),   // max = white
+        (0, 0, 0, 0),         // 0 = transparent
+        (5, 0, 0, 200),       // trace = blue
+        (30, 0, 200, 0),      // low = green
+        (80, 200, 200, 0),    // moderate = yellow
+        (130, 255, 140, 0),   // high = orange
+        (180, 255, 0, 0),     // very high = red
+        (210, 180, 0, 220),   // extreme = purple
+        (240, 255, 255, 255), // max = white
         (255, 255, 255, 255),
     ];
     ColorPalette::from_control_points(points)

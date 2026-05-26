@@ -15,7 +15,6 @@
  *       Stack (pane content, switched by sidebar selection)
  */
 
-use glib;
 use gtk4::prelude::*;
 use gtk4::{Box as GBox, Button, CssProvider, Label, ListBox, Orientation, Separator, Stack};
 use libadwaita::prelude::*;
@@ -30,11 +29,11 @@ use crate::forecast_pane;
 use crate::location_panel;
 use crate::models_pane;
 use crate::national_pane;
-use crate::soundings_pane;
 use crate::observations_pane;
 use crate::radar_pane;
 use crate::satellite_pane;
 use crate::settings_panel;
+use crate::soundings_pane;
 use crate::spc_pane;
 use crate::text_pane;
 

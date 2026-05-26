@@ -10,11 +10,11 @@
  *   https://www.spc.noaa.gov/exper/soundings/LATEST/{SITE}.gif
  */
 
-use glib;
 use gtk4::prelude::*;
 use gtk4::{
     Box as GBox, Button, CellRendererText, DrawingArea, Label, Orientation, Paned, PolicyType,
-    ScrolledWindow, SearchEntry, ToggleButton, TreeModelFilter, TreeStore, TreeView, TreeViewColumn,
+    ScrolledWindow, SearchEntry, ToggleButton, TreeModelFilter, TreeStore, TreeView,
+    TreeViewColumn,
 };
 
 use std::cell::{Cell, RefCell};
@@ -274,7 +274,11 @@ pub fn build_soundings_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         store.set(&cat_iter, &[(0, &region.as_str()), (1, &""), (2, &true)]);
         for site in sites {
             let iter = store.append(Some(&cat_iter));
-            let label = format!("{} — {}", site.id, &site.name[site.name.find(',').map(|i| i + 2).unwrap_or(0)..]);
+            let label = format!(
+                "{} — {}",
+                site.id,
+                &site.name[site.name.find(',').map(|i| i + 2).unwrap_or(0)..]
+            );
             store.set(&iter, &[(0, &label.as_str()), (1, &site.id), (2, &true)]);
         }
     }
@@ -315,8 +319,12 @@ pub fn build_soundings_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
                                 let visible =
                                     query.is_empty() || label.to_lowercase().contains(&query);
                                 store_s.set(&child, &[(2, &visible)]);
-                                if visible { any = true; }
-                                if !store_s.iter_next(&child) { break; }
+                                if visible {
+                                    any = true;
+                                }
+                                if !store_s.iter_next(&child) {
+                                    break;
+                                }
                             }
                         }
                         let this_path = store_s.path(&cat_iter);
@@ -328,7 +336,9 @@ pub fn build_soundings_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
                         };
                         store_s.set(&cat_iter, &[(2, &cat_visible)]);
                     }
-                    if !store_s.iter_next(&cat_iter) { break; }
+                    if !store_s.iter_next(&cat_iter) {
+                        break;
+                    }
                 }
             }
             filter_s.refilter();
@@ -361,7 +371,9 @@ pub fn build_soundings_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
             let iter = model.iter(path).unwrap();
             let site_id: String = model.get::<String>(&iter, 1);
             let label: String = model.get::<String>(&iter, 0);
-            if site_id.is_empty() { return; }
+            if site_id.is_empty() {
+                return;
+            }
 
             {
                 let mut st = state_c.borrow_mut();
@@ -399,7 +411,9 @@ pub fn build_soundings_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
 
         refresh_btn.connect_clicked(move |btn| {
             let site_id = state_r.borrow().current_site_id.clone();
-            if site_id.is_empty() { return; }
+            if site_id.is_empty() {
+                return;
+            }
 
             // Bust cache by clearing soundings namespace entries for this site
             let cache = meso_data::cache::Cache::new("soundings");
@@ -427,15 +441,19 @@ pub fn build_soundings_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
         let state_f = Rc::clone(&state);
         let store_f = store.clone();
         let filter_f = filter.clone();
-        let fav_iter_f = fav_cat_iter.clone();
+        let fav_iter_f = fav_cat_iter;
         let cfg_f = Rc::clone(&shared_config);
         let tv_f = tree_view.clone();
         let suppress_fav_toggle_f = Rc::clone(&suppress_fav_toggle);
 
         fav_btn.connect_toggled(move |btn| {
-            if suppress_fav_toggle_f.get() { return; }
+            if suppress_fav_toggle_f.get() {
+                return;
+            }
             let site_id = state_f.borrow().current_site_id.clone();
-            if site_id.is_empty() { return; }
+            if site_id.is_empty() {
+                return;
+            }
             let site_name = state_f.borrow().current_site_name.clone();
             let is_now_fav = btn.is_active();
             btn.set_label(if is_now_fav { "★" } else { "☆" });
@@ -463,7 +481,9 @@ pub fn build_soundings_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
                             store_f.remove(&child);
                             break;
                         }
-                        if !store_f.iter_next(&child) { break; }
+                        if !store_f.iter_next(&child) {
+                            break;
+                        }
                     }
                 }
                 let still_has = store_f.iter_has_child(&fav_iter_f);
@@ -488,15 +508,20 @@ pub fn build_soundings_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
 
         outer.connect_map(move |_| {
             // Only auto-select once (when state is empty)
-            if !state_auto.borrow().current_site_id.is_empty() { return; }
+            if !state_auto.borrow().current_site_id.is_empty() {
+                return;
+            }
 
             let cfg = cfg_auto.borrow();
             let last = cfg.sounding_last_site.clone();
-            let site_id = if !last.is_empty() && soundings::SITES.iter().any(|s| s.id == last.as_str()) {
-                last
-            } else {
-                soundings::nearest_site(cfg.location_lat, cfg.location_lon).id.to_string()
-            };
+            let site_id =
+                if !last.is_empty() && soundings::SITES.iter().any(|s| s.id == last.as_str()) {
+                    last
+                } else {
+                    soundings::nearest_site(cfg.location_lat, cfg.location_lon)
+                        .id
+                        .to_string()
+                };
             drop(cfg);
 
             let is_fav = cfg_auto.borrow().sounding_favorites.contains(&site_id);
@@ -536,12 +561,7 @@ pub fn build_soundings_pane(shared_config: Rc<RefCell<Config>>) -> GBox {
 
 // ── Helper: select a tree row by site_id ──────────────────────────────────────
 
-fn select_tree_row(
-    tv: &TreeView,
-    store: &TreeStore,
-    filter: &TreeModelFilter,
-    site_id: &str,
-) {
+fn select_tree_row(tv: &TreeView, store: &TreeStore, filter: &TreeModelFilter, site_id: &str) {
     if let Some(cat_iter) = store.iter_first() {
         loop {
             if let Some(child) = store.iter_children(Some(&cat_iter)) {
@@ -556,15 +576,30 @@ fn select_tree_row(
                         }
                         let child_path = store.path(&child);
                         if let Some(fchild_path) = filter.convert_child_path_to_path(&child_path) {
-                            gtk4::prelude::TreeViewExt::set_cursor(tv, &fchild_path, None::<&TreeViewColumn>, false);
-                            tv.scroll_to_cell(Some(&fchild_path), None::<&TreeViewColumn>, false, 0.0, 0.0);
+                            gtk4::prelude::TreeViewExt::set_cursor(
+                                tv,
+                                &fchild_path,
+                                None::<&TreeViewColumn>,
+                                false,
+                            );
+                            tv.scroll_to_cell(
+                                Some(&fchild_path),
+                                None::<&TreeViewColumn>,
+                                false,
+                                0.0,
+                                0.0,
+                            );
                         }
                         return;
                     }
-                    if !store.iter_next(&child) { break; }
+                    if !store.iter_next(&child) {
+                        break;
+                    }
                 }
             }
-            if !store.iter_next(&cat_iter) { break; }
+            if !store.iter_next(&cat_iter) {
+                break;
+            }
         }
     }
 }

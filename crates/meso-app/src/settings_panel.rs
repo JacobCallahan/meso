@@ -112,8 +112,12 @@ pub fn show_settings_panel(parent: &impl IsA<Window>, shared_config: Rc<RefCell<
         .map(|s| format!("{} ({})", s.code, s.name))
         .collect();
     let sector_ids: Vec<&str> = SECTORS.iter().map(|s| s.code).collect();
-    let sector_model =
-        StringList::new(&sector_displays.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+    let sector_model = StringList::new(
+        &sector_displays
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>(),
+    );
     let sector_combo = DropDown::new(Some(sector_model), gtk4::Expression::NONE);
     if let Some(pos) = sector_ids
         .iter()
@@ -338,7 +342,9 @@ pub fn show_settings_panel(parent: &impl IsA<Window>, shared_config: Rc<RefCell<
     outer.append(&updraft_btn);
 
     // Hint label
-    let hint = Label::new(Some("Requires meso-updraft to be set up as a systemd user service."));
+    let hint = Label::new(Some(
+        "Requires meso-updraft to be set up as a systemd user service.",
+    ));
     hint.add_css_class("dim-label");
     hint.set_halign(gtk4::Align::Start);
     hint.set_margin_start(12);

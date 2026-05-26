@@ -51,6 +51,7 @@ pub fn show_location_panel(
     outer.append(&listbox);
 
     // We need a Rc<dyn Fn()> that can call itself, so use a Rc<RefCell<Option<Rc<dyn Fn()>>>>
+    #[allow(clippy::type_complexity)]
     let rebuild_fn: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
     {
@@ -159,11 +160,11 @@ pub fn show_location_panel(
                     return;
                 }
             };
-            if lat < -90.0 || lat > 90.0 {
+            if !(-90.0..=90.0).contains(&lat) {
                 error_label.set_text("Latitude out of range.");
                 return;
             }
-            if lon < -180.0 || lon > 180.0 {
+            if !(-180.0..=180.0).contains(&lon) {
                 error_label.set_text("Longitude out of range.");
                 return;
             }
@@ -193,6 +194,7 @@ pub fn show_location_panel(
     show_panel(parent, "Locations", 480, 560, outer);
 }
 
+#[allow(clippy::type_complexity)]
 fn build_location_row(
     loc: &NamedLocation,
     is_active: bool,
@@ -333,10 +335,10 @@ fn build_location_row(
                         Ok(v) => v,
                         Err(_) => return,
                     };
-                    if new_lat < -90.0 || new_lat > 90.0 {
+                    if !(-90.0..=90.0).contains(&new_lat) {
                         return;
                     }
-                    if new_lon < -180.0 || new_lon > 180.0 {
+                    if !(-180.0..=180.0).contains(&new_lon) {
                         return;
                     }
 

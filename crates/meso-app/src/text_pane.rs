@@ -150,7 +150,8 @@ pub fn build_text_pane(default_wfo: &str, radar_site: &str) -> GBox {
                             wfo = resolved;
                         }
                     }
-                    let product = text_products::fetch_latest_text(&client, &product_type, &wfo).await?;
+                    let product =
+                        text_products::fetch_latest_text(&client, &product_type, &wfo).await?;
                     Ok::<_, anyhow::Error>((product, wfo))
                 },
                 move |result| {

@@ -56,7 +56,7 @@ fn parse_sti_text(text: &str, site_lat: f64, site_lon: f64) -> Result<Vec<StormC
     let re_ids = Regex::new(r"STORM ID\s+((?:[A-Z0-9]{2}\s+)+)").unwrap();
     let re_num = Regex::new(r"\d+").unwrap();
 
-    let flat = text.replace('\r', " ").replace('\n', " ");
+    let flat = text.replace(['\r', '\n'], " ");
 
     let ids: Vec<String> = {
         let mut all = Vec::new();
