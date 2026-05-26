@@ -36,6 +36,10 @@ struct DaemonConfig {
     cache_radar_hours: u32,
     #[serde(default = "default_cache_sat_hours")]
     cache_sat_hours: u32,
+    #[serde(default = "default_radar_anim_frames")]
+    radar_anim_frames: u8,
+    #[serde(default = "default_sat_anim_frames")]
+    sat_anim_frames: u8,
 }
 
 fn default_true() -> bool {
@@ -50,6 +54,12 @@ fn default_cache_radar_hours() -> u32 {
 fn default_cache_sat_hours() -> u32 {
     24
 }
+fn default_radar_anim_frames() -> u8 {
+    20
+}
+fn default_sat_anim_frames() -> u8 {
+    10
+}
 
 impl Default for DaemonConfig {
     fn default() -> Self {
@@ -58,6 +68,8 @@ impl Default for DaemonConfig {
             updraft_interval_secs: default_interval(),
             cache_radar_hours: default_cache_radar_hours(),
             cache_sat_hours: default_cache_sat_hours(),
+            radar_anim_frames: default_radar_anim_frames(),
+            sat_anim_frames: default_sat_anim_frames(),
         }
     }
 }
@@ -119,7 +131,14 @@ async fn main() -> Result<()> {
             n_radar, n_sat
         );
 
-        fetch::run_fetch_cycle(&client, &subs.radar, &subs.satellite).await;
+        fetch::run_fetch_cycle(
+            &client,
+            &subs.radar,
+            &subs.satellite,
+            cfg.radar_anim_frames as usize,
+            cfg.sat_anim_frames as usize,
+        )
+        .await;
 
         // Purge stale cache entries based on configured retention
         let max_age =

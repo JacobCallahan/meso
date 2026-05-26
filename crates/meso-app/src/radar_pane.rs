@@ -2133,7 +2133,7 @@ fn time_span_str(timestamps: &[String]) -> String {
 
 /// Process L2 animation frames one at a time on the GTK main loop via idle callbacks.
 /// Frames are already decompressed (BZ2 expansion done in async task).
-/// Updates status with "Rendering N/total..." between frames.
+/// Writes each frame into state immediately so animation starts on the first decoded frame.
 #[allow(clippy::too_many_arguments)]
 fn render_l2_frames_idle(
     decomp_frames: Vec<Vec<u8>>,
@@ -2148,12 +2148,19 @@ fn render_l2_frames_idle(
     timeline: Scale,
     slider_updating: Rc<Cell<bool>>,
 ) {
+    // Clear any stale animation state so frames append cleanly.
+    {
+        let mut st = state.borrow_mut();
+        st.anim_pixbufs.clear();
+        st.anim_timestamps.clear();
+        st.anim_l2_frames.clear();
+        st.anim_l3_frames.clear();
+        st.anim_index = 0;
+    }
     let frame_iter: Rc<RefCell<std::vec::IntoIter<Vec<u8>>>> =
         Rc::new(RefCell::new(decomp_frames.into_iter()));
-    let pixbufs: Rc<RefCell<Vec<Pixbuf>>> = Rc::new(RefCell::new(Vec::new()));
-    let timestamps: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let decoded: Rc<RefCell<Vec<(Level2Data, bool)>>> = Rc::new(RefCell::new(Vec::new()));
     let idx = Rc::new(Cell::new(0usize));
+    let timer_started = Rc::new(Cell::new(false));
 
     glib::idle_add_local(move || {
         let decompressed = { frame_iter.borrow_mut().next() };
@@ -2162,79 +2169,72 @@ fn render_l2_frames_idle(
             idx.set(i + 1);
             status.set_text(&format!("Rendering frame {}/{total}...", i + 1));
             let tilt_idx = state.borrow().l2_tilt_idx;
-            let st = state.borrow();
-            if let Ok(l2) = level2::decode(&decompressed, vel, tilt_idx) {
-                let code: u16 = if vel { 99 } else { 94 };
-                let palette = st.palette_registry.for_product(code);
-                if let Ok(img) = cairo_render::render_level2(
-                    &l2,
-                    palette,
-                    &st.viewport,
-                    &st.overlays,
-                    vel,
-                    Some(st.map_data.as_ref()),
-                ) {
-                    timestamps.borrow_mut().push(l2.timestamp_str());
-                    pixbufs.borrow_mut().push(rgba_to_pixbuf(&img));
-                    decoded.borrow_mut().push((l2, vel));
+            // Render while holding an immutable borrow, then drop before mutating state.
+            let rendered: Option<(String, Pixbuf, Level2Data)> = {
+                let st = state.borrow();
+                level2::decode(&decompressed, vel, tilt_idx)
+                    .ok()
+                    .and_then(|l2| {
+                        let code: u16 = if vel { 99 } else { 94 };
+                        let palette = st.palette_registry.for_product(code);
+                        cairo_render::render_level2(
+                            &l2,
+                            palette,
+                            &st.viewport,
+                            &st.overlays,
+                            vel,
+                            Some(st.map_data.as_ref()),
+                        )
+                        .ok()
+                        .map(|img| (l2.timestamp_str(), rgba_to_pixbuf(&img), l2))
+                    })
+            };
+            if let Some((ts, pixbuf, l2)) = rendered {
+                let is_first = {
+                    let mut st = state.borrow_mut();
+                    st.anim_timestamps.push(ts);
+                    st.anim_pixbufs.push(pixbuf);
+                    st.anim_l2_frames.push((l2, vel));
+                    let first = st.anim_pixbufs.len() == 1;
+                    if first {
+                        st.current_pixbuf = st.anim_pixbufs.first().cloned();
+                        st.timestamp_str = st.anim_timestamps.first().cloned();
+                    }
+                    first
+                };
+                drawing_area.queue_draw();
+                if is_first && !timer_started.get() {
+                    timer_started.set(true);
+                    start_timer(
+                        Rc::clone(&state),
+                        drawing_area.clone(),
+                        Rc::clone(&running),
+                        Rc::clone(&timer),
+                        timeline.clone(),
+                        Rc::clone(&slider_updating),
+                    );
                 }
             }
             glib::ControlFlow::Continue
         } else {
-            let bufs = std::mem::take(&mut *pixbufs.borrow_mut());
-            let ts = std::mem::take(&mut *timestamps.borrow_mut());
-            let dec = std::mem::take(&mut *decoded.borrow_mut());
+            // All frames rendered; finalize the UI.
+            let n = state.borrow().anim_pixbufs.len();
             anim_btn.set_sensitive(true);
-            if bufs.is_empty() {
+            if n == 0 {
                 status.set_text("Animation: no frames decoded");
                 running.set(false);
             } else {
+                let ts = state.borrow().anim_timestamps.clone();
                 let span = time_span_str(&ts);
-                let n = bufs.len();
-                // Configure timeline range and reset to frame 0
+                let cur_idx = state.borrow().anim_index;
+                // Update timeline range now that the final frame count is known.
                 slider_updating.set(true);
-                if n > 0 {
-                    // Set range first (without value changing)
-                    timeline.set_range(0.0, (n - 1) as f64);
-                    timeline.set_value(0.0);
-                    timeline.set_sensitive(true);
-                } else {
-                    timeline.set_sensitive(false);
-                }
+                timeline.set_range(0.0, (n - 1) as f64);
+                timeline.set_value(cur_idx as f64);
+                timeline.set_sensitive(true);
                 slider_updating.set(false);
-
-                // Verify timeline value in idle callback after GTK processes signals
-                if n > 0 {
-                    let timeline_c = timeline.clone();
-                    let su_c = Rc::clone(&slider_updating);
-                    glib::idle_add_local(move || {
-                        if timeline_c.value() != 0.0 {
-                            su_c.set(true);
-                            timeline_c.set_value(0.0);
-                            su_c.set(false);
-                        }
-                        glib::ControlFlow::Break
-                    });
-                }
-                {
-                    let mut st = state.borrow_mut();
-                    st.anim_pixbufs = bufs;
-                    st.anim_timestamps = ts;
-                    st.anim_index = 0;
-                    st.anim_l2_frames = dec;
-                    st.anim_l3_frames.clear();
-                    st.current_pixbuf = Some(st.anim_pixbufs[0].clone());
-                }
                 status.set_text(&format!("Animating {n} frames{span}"));
                 anim_btn.set_label("⏸ Pause");
-                start_timer(
-                    Rc::clone(&state),
-                    drawing_area.clone(),
-                    Rc::clone(&running),
-                    Rc::clone(&timer),
-                    timeline.clone(),
-                    Rc::clone(&slider_updating),
-                );
             }
             glib::ControlFlow::Break
         }
@@ -2242,6 +2242,7 @@ fn render_l2_frames_idle(
 }
 
 /// Process L3 animation frames one at a time on the GTK main loop via idle callbacks.
+/// Writes each frame into state immediately so animation starts on the first decoded frame.
 #[allow(clippy::too_many_arguments)]
 fn render_l3_frames_idle(
     raw_frames: Vec<Vec<u8>>,
@@ -2255,12 +2256,19 @@ fn render_l3_frames_idle(
     timeline: Scale,
     slider_updating: Rc<Cell<bool>>,
 ) {
+    // Clear any stale animation state so frames append cleanly.
+    {
+        let mut st = state.borrow_mut();
+        st.anim_pixbufs.clear();
+        st.anim_timestamps.clear();
+        st.anim_l3_frames.clear();
+        st.anim_l2_frames.clear();
+        st.anim_index = 0;
+    }
     let raw_iter: Rc<RefCell<std::vec::IntoIter<Vec<u8>>>> =
         Rc::new(RefCell::new(raw_frames.into_iter()));
-    let pixbufs: Rc<RefCell<Vec<Pixbuf>>> = Rc::new(RefCell::new(Vec::new()));
-    let timestamps: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
-    let decoded: Rc<RefCell<Vec<Level3Data>>> = Rc::new(RefCell::new(Vec::new()));
     let idx = Rc::new(Cell::new(0usize));
+    let timer_started = Rc::new(Cell::new(false));
 
     glib::idle_add_local(move || {
         let raw = { raw_iter.borrow_mut().next() };
@@ -2268,78 +2276,70 @@ fn render_l3_frames_idle(
             let i = idx.get();
             idx.set(i + 1);
             status.set_text(&format!("Rendering frame {}/{total}...", i + 1));
-            let st = state.borrow();
-            let is_vel = st.product.is_velocity();
-            if let Ok(l3) = level3::decode(&raw) {
-                let palette = st.palette_registry.for_product(l3.product_code);
-                if let Ok(img) = cairo_render::render_level3(
-                    &l3,
-                    palette,
-                    &st.viewport,
-                    &st.overlays,
-                    is_vel,
-                    Some(st.map_data.as_ref()),
-                ) {
-                    timestamps.borrow_mut().push(l3.timestamp_str());
-                    pixbufs.borrow_mut().push(rgba_to_pixbuf(&img));
-                    decoded.borrow_mut().push(l3);
+            // Render while holding an immutable borrow, then drop before mutating state.
+            let rendered: Option<(String, Pixbuf, Level3Data)> = {
+                let st = state.borrow();
+                let is_vel = st.product.is_velocity();
+                level3::decode(&raw).ok().and_then(|l3| {
+                    let palette = st.palette_registry.for_product(l3.product_code);
+                    cairo_render::render_level3(
+                        &l3,
+                        palette,
+                        &st.viewport,
+                        &st.overlays,
+                        is_vel,
+                        Some(st.map_data.as_ref()),
+                    )
+                    .ok()
+                    .map(|img| (l3.timestamp_str(), rgba_to_pixbuf(&img), l3))
+                })
+            };
+            if let Some((ts, pixbuf, l3)) = rendered {
+                let is_first = {
+                    let mut st = state.borrow_mut();
+                    st.anim_timestamps.push(ts);
+                    st.anim_pixbufs.push(pixbuf);
+                    st.anim_l3_frames.push(l3);
+                    let first = st.anim_pixbufs.len() == 1;
+                    if first {
+                        st.current_pixbuf = st.anim_pixbufs.first().cloned();
+                        st.timestamp_str = st.anim_timestamps.first().cloned();
+                    }
+                    first
+                };
+                drawing_area.queue_draw();
+                if is_first && !timer_started.get() {
+                    timer_started.set(true);
+                    start_timer(
+                        Rc::clone(&state),
+                        drawing_area.clone(),
+                        Rc::clone(&running),
+                        Rc::clone(&timer),
+                        timeline.clone(),
+                        Rc::clone(&slider_updating),
+                    );
                 }
             }
             glib::ControlFlow::Continue
         } else {
-            let bufs = std::mem::take(&mut *pixbufs.borrow_mut());
-            let ts = std::mem::take(&mut *timestamps.borrow_mut());
-            let dec = std::mem::take(&mut *decoded.borrow_mut());
+            // All frames rendered; finalize the UI.
+            let n = state.borrow().anim_pixbufs.len();
             anim_btn.set_sensitive(true);
-            if bufs.is_empty() {
+            if n == 0 {
                 status.set_text("Animation: no frames decoded");
                 running.set(false);
             } else {
+                let ts = state.borrow().anim_timestamps.clone();
                 let span = time_span_str(&ts);
-                let n = bufs.len();
+                let cur_idx = state.borrow().anim_index;
+                // Update timeline range now that the final frame count is known.
                 slider_updating.set(true);
-                if n > 0 {
-                    // Set range first (without value changing)
-                    timeline.set_range(0.0, (n - 1) as f64);
-                    timeline.set_value(0.0);
-                    timeline.set_sensitive(true);
-                } else {
-                    timeline.set_sensitive(false);
-                }
+                timeline.set_range(0.0, (n - 1) as f64);
+                timeline.set_value(cur_idx as f64);
+                timeline.set_sensitive(true);
                 slider_updating.set(false);
-
-                // Verify timeline value in idle callback after GTK processes signals
-                if n > 0 {
-                    let timeline_c = timeline.clone();
-                    let su_c = Rc::clone(&slider_updating);
-                    glib::idle_add_local(move || {
-                        if timeline_c.value() != 0.0 {
-                            su_c.set(true);
-                            timeline_c.set_value(0.0);
-                            su_c.set(false);
-                        }
-                        glib::ControlFlow::Break
-                    });
-                }
-                {
-                    let mut st = state.borrow_mut();
-                    st.anim_pixbufs = bufs;
-                    st.anim_timestamps = ts;
-                    st.anim_index = 0;
-                    st.anim_l3_frames = dec;
-                    st.anim_l2_frames.clear();
-                    st.current_pixbuf = Some(st.anim_pixbufs[0].clone());
-                }
                 status.set_text(&format!("Animating {n} frames{span}"));
                 anim_btn.set_label("⏸ Pause");
-                start_timer(
-                    Rc::clone(&state),
-                    drawing_area.clone(),
-                    Rc::clone(&running),
-                    Rc::clone(&timer),
-                    timeline.clone(),
-                    Rc::clone(&slider_updating),
-                );
             }
             glib::ControlFlow::Break
         }
