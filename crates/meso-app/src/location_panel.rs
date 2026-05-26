@@ -24,12 +24,14 @@ use meso_data::geo::sites;
 use crate::config::{Config, NamedLocation};
 use crate::panel::show_panel;
 
+type LocationActivateCb = dyn Fn(&str, Option<LatLon>);
+
 pub fn show_location_panel(
     parent: &impl IsA<Window>,
     shared_config: Rc<RefCell<Config>>,
-    on_activate: impl Fn(&str) + 'static,
+    on_activate: impl Fn(&str, Option<LatLon>) + 'static,
 ) {
-    let on_activate: Rc<dyn Fn(&str)> = Rc::new(on_activate);
+    let on_activate: Rc<LocationActivateCb> = Rc::new(on_activate);
 
     let outer = GBox::new(Orientation::Vertical, 6);
     outer.set_margin_start(4);
@@ -200,7 +202,7 @@ fn build_location_row(
     is_active: bool,
     idx: usize,
     shared_config: Rc<RefCell<Config>>,
-    on_activate: Rc<dyn Fn(&str)>,
+    on_activate: Rc<LocationActivateCb>,
     rebuild_fn: Rc<RefCell<Option<Rc<dyn Fn()>>>>,
 ) -> ListBoxRow {
     let row = ListBoxRow::new();
@@ -243,14 +245,15 @@ fn build_location_row(
         let on_activate = Rc::clone(&on_activate);
         let rebuild_fn = Rc::clone(&rebuild_fn);
         b.connect_clicked(move |_| {
-            let site_id = {
+            let (site_id, latlon) = {
                 let mut cfg = shared_config.borrow_mut();
                 cfg.active_location = name.clone();
                 cfg.location_lat = lat;
                 cfg.location_lon = lon;
-                sites::nearest_site(&LatLon { lat, lon }, false).to_string()
+                let site_id = sites::nearest_site(&LatLon { lat, lon }, false).to_string();
+                (site_id, LatLon { lat, lon })
             };
-            on_activate(&site_id);
+            on_activate(&site_id, Some(latlon));
             if let Some(rb) = rebuild_fn.borrow().as_ref() {
                 rb();
             }

@@ -1,7 +1,5 @@
 /target/
 /.cache/
-/.vscode/
-/.idea/
 .DS_Store
 Thumbs.db
 *.swp
@@ -13,3 +11,7 @@ Thumbs.db
 *.orig
 *.rej
 
+# editors
+/.antigravitycli/
+/.vscode/
+/.idea/

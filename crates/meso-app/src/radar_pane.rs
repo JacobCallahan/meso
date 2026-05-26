@@ -180,7 +180,9 @@ impl RadarPaneState {
 // ── Public widget builder ─────────────────────────────────────────────────────
 
 #[allow(clippy::type_complexity)]
-pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&str)>) {
+pub fn build_radar_pane(
+    shared_cfg: Rc<RefCell<Config>>,
+) -> (GBox, Rc<dyn Fn(&str, Option<LatLon>)>) {
     let cfg_snapshot = shared_cfg.borrow().clone();
     let map_data = Rc::new(MapData::load());
     let left_state = Rc::new(RefCell::new(RadarPaneState::new(
@@ -206,6 +208,7 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
     let anim_timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
     let zoom_debounce: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
     let slider_updating: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    let pending_center: Rc<Cell<Option<LatLon>>> = Rc::new(Cell::new(None));
 
     let vbox = GBox::new(Orientation::Vertical, 0);
     let toolbar = GBox::new(Orientation::Horizontal, 4);
@@ -538,6 +541,103 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         });
     }
 
+    let apply_site_change = {
+        let left_state = Rc::clone(&left_state);
+        let right_state = Rc::clone(&right_state);
+        let left_da = left_da.clone();
+        let right_da = right_da.clone();
+        let cfg = Rc::clone(&shared_cfg);
+        let pane_count = Rc::clone(&pane_count);
+        let anim_running = Rc::clone(&anim_running);
+        let anim_timer = Rc::clone(&anim_timer);
+        let anim_btn = anim_btn.clone();
+        let status = status.clone();
+        let tilt_combo = tilt_combo.clone();
+        let site_ids = site_ids.clone();
+        let pending_center = Rc::clone(&pending_center);
+        let btns = vec![refresh_btn.clone(), anim_btn.clone()];
+
+        Rc::new(move |selected_idx: usize| {
+            let id = site_ids[selected_idx].clone();
+            stop_animation(&anim_running, &anim_timer);
+            anim_btn.set_label("▶ Animate");
+
+            let center_opt = pending_center.take();
+            let current_zoom = {
+                let st = left_state.borrow();
+                st.viewport.zoom
+            };
+
+            {
+                let mut cfg = cfg.borrow_mut();
+                cfg.radar_site = id.clone();
+                if let Some(center) = center_opt {
+                    cfg.radar_center_lat = center.lat;
+                    cfg.radar_center_lon = center.lon;
+                    cfg.radar_zoom = current_zoom;
+                } else {
+                    cfg.radar_zoom = 1.0;
+                    cfg.radar_center_lat = 0.0;
+                    cfg.radar_center_lon = 0.0;
+                }
+            }
+            for st in [&left_state, &right_state] {
+                let mut st = st.borrow_mut();
+                st.site_id = id.clone();
+                st.clear_cache();
+                if let Some(loc) = sites::site_latlon(&id) {
+                    let w = st.viewport.width;
+                    let h = st.viewport.height;
+                    let mut vp = Viewport::new(loc, w, h);
+                    if let Some(center) = center_opt {
+                        vp.center = center;
+                        vp.zoom = current_zoom;
+                    }
+                    st.viewport = vp;
+                }
+            }
+            trigger_load(
+                Rc::clone(&left_state),
+                left_da.clone(),
+                status.clone(),
+                btns.clone(),
+                tilt_combo.clone(),
+            );
+            refresh_warnings(Rc::clone(&left_state), left_da.clone(), Rc::clone(&cfg));
+            refresh_storm_tracks(Rc::clone(&left_state), left_da.clone(), Rc::clone(&cfg));
+            if pane_count.get() == 2 {
+                trigger_load(
+                    Rc::clone(&right_state),
+                    right_da.clone(),
+                    status.clone(),
+                    btns.clone(),
+                    tilt_combo.clone(),
+                );
+                refresh_warnings(Rc::clone(&right_state), right_da.clone(), Rc::clone(&cfg));
+                refresh_storm_tracks(Rc::clone(&right_state), right_da.clone(), Rc::clone(&cfg));
+            }
+            left_da.queue_draw();
+            right_da.queue_draw();
+        })
+    };
+
+    let change_site_fn: Rc<dyn Fn(&str, Option<LatLon>)> = {
+        let site_combo = site_combo.clone();
+        let site_ids = site_ids.clone();
+        let pending_center = Rc::clone(&pending_center);
+        let apply_site_change = Rc::clone(&apply_site_change);
+        Rc::new(move |site_id: &str, latlon: Option<LatLon>| {
+            pending_center.set(latlon);
+            if let Some(pos) = site_ids.iter().position(|id| id == site_id) {
+                if site_combo.selected() == pos as u32 {
+                    apply_site_change(pos);
+                } else {
+                    site_combo.set_selected(pos as u32);
+                }
+            }
+        })
+    };
+
     let sync_zoom_pan = {
         let left_state = Rc::clone(&left_state);
         let right_state = Rc::clone(&right_state);
@@ -613,240 +713,261 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         });
     }
 
-    let wire_nav_events = |da: &DrawingArea, is_left: bool| {
-        let slot = if is_left { 0 } else { 1 };
-        let leftclick = gtk4::GestureClick::new();
-        leftclick.set_button(1);
-        {
-            let set_active = Rc::clone(&set_active_ui);
-            leftclick.connect_pressed(move |_g, _n, _x, _y| {
-                set_active(slot);
-            });
-        }
-        da.add_controller(leftclick);
-
-        let mouse_pos = Rc::new(Cell::new((0.0f64, 0.0f64)));
-        let motion = gtk4::EventControllerMotion::new();
-        {
-            let mp = Rc::clone(&mouse_pos);
-            motion.connect_motion(move |_, x, y| {
-                mp.set((x, y));
-            });
-        }
-        da.add_controller(motion);
-
-        let scroll = gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
-        {
-            let mp = Rc::clone(&mouse_pos);
-            let sync_fn = sync_zoom_pan.clone();
-            let set_active = Rc::clone(&set_active_ui);
-            scroll.connect_scroll(move |_, _dx, dy| {
-                set_active(slot);
-                let factor = if dy < 0.0 { 1.15 } else { 1.0 / 1.15 };
-                let (mx, my) = mp.get();
-                sync_fn(&|vp| {
-                    vp.zoom_around_screen_point(mx, my, factor);
-                });
-                glib::Propagation::Stop
-            });
-        }
-        da.add_controller(scroll);
-
-        let drag = gtk4::GestureDrag::new();
-        let last_offset = Rc::new(RefCell::new((0.0f64, 0.0f64)));
-        {
-            let sync_fn = sync_zoom_pan.clone();
-            let last_off = Rc::clone(&last_offset);
-            let set_active = Rc::clone(&set_active_ui);
-            drag.connect_drag_update(move |_gesture, dx, dy| {
-                set_active(slot);
-                let (prev_dx, prev_dy) = *last_off.borrow();
-                let delta_x = dx - prev_dx;
-                let delta_y = dy - prev_dy;
-                *last_off.borrow_mut() = (dx, dy);
-                sync_fn(&|vp| {
-                    vp.pan_pixels(delta_x, delta_y);
-                });
-            });
-        }
-        {
-            let last_off = Rc::clone(&last_offset);
-            drag.connect_drag_end(move |_, _, _| {
-                *last_off.borrow_mut() = (0.0, 0.0);
-            });
-        }
-        da.add_controller(drag);
-
-        let rightclick = gtk4::GestureClick::new();
-        rightclick.set_button(3);
-        let set_active = Rc::clone(&set_active_ui);
-        let status_rc = status.clone();
-        let cfg_rc = Rc::clone(&shared_cfg);
-        let shared_index_rc = Rc::clone(&shared_index);
-        let left_da_rc = left_da.clone();
-        let right_da_rc = right_da.clone();
-        let menu_parent = da.clone();
-        let pane_state = if is_left {
-            Rc::clone(&left_state)
-        } else {
-            Rc::clone(&right_state)
-        };
-        rightclick.connect_pressed(move |gesture, _n, x, y| {
-            gesture.set_state(gtk4::EventSequenceState::Claimed);
-            set_active(slot);
-            let clicked_ll = {
-                let st = pane_state.borrow();
-                st.viewport.screen_to_latlon(x, y)
-            };
-            let frame_idx = shared_index_rc.get();
-            let frame_time = {
-                let st = pane_state.borrow();
-                st.anim_timestamps
-                    .get(frame_idx)
-                    .cloned()
-                    .or_else(|| st.timestamp_str.clone())
-            };
-
-            let popover = Popover::new();
-            popover.set_has_arrow(true);
-            popover.set_autohide(true);
-            popover.set_parent(&menu_parent);
-            let rect = gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
-            popover.set_pointing_to(Some(&rect));
-
-            let menu = GBox::new(Orientation::Vertical, 2);
-            menu.set_margin_top(6);
-            menu.set_margin_bottom(6);
-            menu.set_margin_start(6);
-            menu.set_margin_end(6);
-
-            let inspect_btn = Button::with_label("Inspect");
-            let add_location_btn = Button::with_label("Add Location Here");
-            let add_marker_btn = Button::with_label("Add Tracking Marker");
-            let remove_marker_btn = Button::with_label("Remove Nearest Marker");
-            let clear_track_btn = Button::with_label("Clear Active Track");
-
+    let wire_nav_events =
+        |da: &DrawingArea, is_left: bool, change_site_fn: Rc<dyn Fn(&str, Option<LatLon>)>| {
+            let slot = if is_left { 0 } else { 1 };
+            let leftclick = gtk4::GestureClick::new();
+            leftclick.set_button(1);
             {
-                let pane_state = Rc::clone(&pane_state);
-                let status = status_rc.clone();
-                let clicked = clicked_ll;
-                let pop = popover.clone();
-                inspect_btn.connect_clicked(move |_| {
+                let set_active = Rc::clone(&set_active_ui);
+                leftclick.connect_pressed(move |_g, _n, _x, _y| {
+                    set_active(slot);
+                });
+            }
+            da.add_controller(leftclick);
+
+            let mouse_pos = Rc::new(Cell::new((0.0f64, 0.0f64)));
+            let motion = gtk4::EventControllerMotion::new();
+            {
+                let mp = Rc::clone(&mouse_pos);
+                motion.connect_motion(move |_, x, y| {
+                    mp.set((x, y));
+                });
+            }
+            da.add_controller(motion);
+
+            let scroll =
+                gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
+            {
+                let mp = Rc::clone(&mouse_pos);
+                let sync_fn = sync_zoom_pan.clone();
+                let set_active = Rc::clone(&set_active_ui);
+                scroll.connect_scroll(move |_, _dx, dy| {
+                    set_active(slot);
+                    let factor = if dy < 0.0 { 1.15 } else { 1.0 / 1.15 };
+                    let (mx, my) = mp.get();
+                    sync_fn(&|vp| {
+                        vp.zoom_around_screen_point(mx, my, factor);
+                    });
+                    glib::Propagation::Stop
+                });
+            }
+            da.add_controller(scroll);
+
+            let drag = gtk4::GestureDrag::new();
+            let last_offset = Rc::new(RefCell::new((0.0f64, 0.0f64)));
+            {
+                let sync_fn = sync_zoom_pan.clone();
+                let last_off = Rc::clone(&last_offset);
+                let set_active = Rc::clone(&set_active_ui);
+                drag.connect_drag_update(move |_gesture, dx, dy| {
+                    set_active(slot);
+                    let (prev_dx, prev_dy) = *last_off.borrow();
+                    let delta_x = dx - prev_dx;
+                    let delta_y = dy - prev_dy;
+                    *last_off.borrow_mut() = (dx, dy);
+                    sync_fn(&|vp| {
+                        vp.pan_pixels(delta_x, delta_y);
+                    });
+                });
+            }
+            {
+                let last_off = Rc::clone(&last_offset);
+                drag.connect_drag_end(move |_, _, _| {
+                    *last_off.borrow_mut() = (0.0, 0.0);
+                });
+            }
+            da.add_controller(drag);
+
+            let rightclick = gtk4::GestureClick::new();
+            rightclick.set_button(3);
+            let set_active = Rc::clone(&set_active_ui);
+            let status_rc = status.clone();
+            let cfg_rc = Rc::clone(&shared_cfg);
+            let shared_index_rc = Rc::clone(&shared_index);
+            let left_da_rc = left_da.clone();
+            let right_da_rc = right_da.clone();
+            let menu_parent = da.clone();
+            let pane_state = if is_left {
+                Rc::clone(&left_state)
+            } else {
+                Rc::clone(&right_state)
+            };
+            rightclick.connect_pressed(move |gesture, _n, x, y| {
+                gesture.set_state(gtk4::EventSequenceState::Claimed);
+                set_active(slot);
+                let clicked_ll = {
                     let st = pane_state.borrow();
-                    status.set_text(&build_inspect_message(&st, &clicked));
-                    pop.popdown();
-                });
-            }
-            {
-                let cfg = Rc::clone(&cfg_rc);
-                let status = status_rc.clone();
-                let clicked = clicked_ll;
-                let frame_time = frame_time.clone();
-                let left_da = left_da_rc.clone();
-                let right_da = right_da_rc.clone();
-                let pop = popover.clone();
-                add_marker_btn.connect_clicked(move |_| {
-                    let point = RadarTrackPoint {
-                        lat: clicked.lat,
-                        lon: clicked.lon,
-                        created_at: Utc::now().to_rfc3339(),
-                        frame_index: frame_idx,
-                        frame_time: frame_time.clone(),
-                    };
-                    let (track_name, point_count) = {
-                        let mut cfg = cfg.borrow_mut();
-                        let idx = append_track_point(&mut cfg, point);
-                        let track = &cfg.radar_tracks[idx];
-                        (track.name.clone(), track.points.len())
-                    };
-                    status.set_text(&format!(
-                        "Added marker to {track_name} ({point_count} points)"
-                    ));
-                    left_da.queue_draw();
-                    right_da.queue_draw();
-                    pop.popdown();
-                });
-            }
-            {
-                let cfg = Rc::clone(&cfg_rc);
-                let status = status_rc.clone();
-                let clicked = clicked_ll;
-                let left_da = left_da_rc.clone();
-                let right_da = right_da_rc.clone();
-                let pop = popover.clone();
-                add_location_btn.connect_clicked(move |_| {
-                    show_location_editor_dialog(
-                        "New",
-                        clicked.lat,
-                        clicked.lon,
-                        Rc::clone(&cfg),
-                        status.clone(),
-                        left_da.clone(),
-                        right_da.clone(),
-                    );
-                    pop.popdown();
-                });
-            }
-            {
-                let cfg = Rc::clone(&cfg_rc);
-                let status = status_rc.clone();
-                let clicked = clicked_ll;
-                let left_da = left_da_rc.clone();
-                let right_da = right_da_rc.clone();
-                let pop = popover.clone();
-                remove_marker_btn.connect_clicked(move |_| {
-                    let removed = {
-                        let mut cfg = cfg.borrow_mut();
-                        remove_nearest_track_point(&mut cfg, &clicked, 40.0)
-                    };
-                    if removed {
-                        status.set_text("Removed nearest marker");
-                    } else {
-                        status.set_text("No marker near cursor");
-                    }
-                    left_da.queue_draw();
-                    right_da.queue_draw();
-                    pop.popdown();
-                });
-            }
-            {
-                let cfg = Rc::clone(&cfg_rc);
-                let status = status_rc.clone();
-                let left_da = left_da_rc.clone();
-                let right_da = right_da_rc.clone();
-                let pop = popover.clone();
-                clear_track_btn.connect_clicked(move |_| {
-                    let cleared = {
-                        let mut cfg = cfg.borrow_mut();
-                        clear_active_track(&mut cfg)
-                    };
-                    if cleared {
-                        status.set_text("Cleared active track");
-                    } else {
-                        status.set_text("No active track markers to clear");
-                    }
-                    left_da.queue_draw();
-                    right_da.queue_draw();
-                    pop.popdown();
-                });
-            }
+                    st.viewport.screen_to_latlon(x, y)
+                };
+                let frame_idx = shared_index_rc.get();
+                let frame_time = {
+                    let st = pane_state.borrow();
+                    st.anim_timestamps
+                        .get(frame_idx)
+                        .cloned()
+                        .or_else(|| st.timestamp_str.clone())
+                };
 
-            for btn in [
-                &inspect_btn,
-                &add_location_btn,
-                &add_marker_btn,
-                &remove_marker_btn,
-                &clear_track_btn,
-            ] {
-                menu.append(btn);
-            }
-            popover.set_child(Some(&menu));
-            popover.popup();
-        });
-        da.add_controller(rightclick);
-    };
-    wire_nav_events(&left_da, true);
-    wire_nav_events(&right_da, false);
+                let popover = Popover::new();
+                popover.set_has_arrow(true);
+                popover.set_autohide(true);
+                popover.set_parent(&menu_parent);
+                let rect = gtk4::gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+                popover.set_pointing_to(Some(&rect));
+
+                let menu = GBox::new(Orientation::Vertical, 2);
+                menu.set_margin_top(6);
+                menu.set_margin_bottom(6);
+                menu.set_margin_start(6);
+                menu.set_margin_end(6);
+
+                let inspect_btn = Button::with_label("Inspect");
+                let re_center_btn = Button::with_label("Re-center Here");
+                let add_location_btn = Button::with_label("Add Location Here");
+                let add_marker_btn = Button::with_label("Add Tracking Marker");
+                let remove_marker_btn = Button::with_label("Remove Nearest Marker");
+                let clear_track_btn = Button::with_label("Clear Active Track");
+
+                {
+                    let pane_state = Rc::clone(&pane_state);
+                    let status = status_rc.clone();
+                    let clicked = clicked_ll;
+                    let pop = popover.clone();
+                    inspect_btn.connect_clicked(move |_| {
+                        let st = pane_state.borrow();
+                        status.set_text(&build_inspect_message(&st, &clicked));
+                        pop.popdown();
+                    });
+                }
+                {
+                    let cfg = Rc::clone(&cfg_rc);
+                    let clicked = clicked_ll;
+                    let pop = popover.clone();
+                    let csf = Rc::clone(&change_site_fn);
+                    re_center_btn.connect_clicked(move |_| {
+                        let site_id = {
+                            let mut cfg = cfg.borrow_mut();
+                            cfg.active_location = String::new();
+                            cfg.location_lat = clicked.lat;
+                            cfg.location_lon = clicked.lon;
+                            sites::nearest_site(&clicked, false).to_string()
+                        };
+                        csf(&site_id, Some(clicked));
+                        pop.popdown();
+                    });
+                }
+                {
+                    let cfg = Rc::clone(&cfg_rc);
+                    let status = status_rc.clone();
+                    let clicked = clicked_ll;
+                    let frame_time = frame_time.clone();
+                    let left_da = left_da_rc.clone();
+                    let right_da = right_da_rc.clone();
+                    let pop = popover.clone();
+                    add_marker_btn.connect_clicked(move |_| {
+                        let point = RadarTrackPoint {
+                            lat: clicked.lat,
+                            lon: clicked.lon,
+                            created_at: Utc::now().to_rfc3339(),
+                            frame_index: frame_idx,
+                            frame_time: frame_time.clone(),
+                        };
+                        let (track_name, point_count) = {
+                            let mut cfg = cfg.borrow_mut();
+                            let idx = append_track_point(&mut cfg, point);
+                            let track = &cfg.radar_tracks[idx];
+                            (track.name.clone(), track.points.len())
+                        };
+                        status.set_text(&format!(
+                            "Added marker to {track_name} ({point_count} points)"
+                        ));
+                        left_da.queue_draw();
+                        right_da.queue_draw();
+                        pop.popdown();
+                    });
+                }
+                {
+                    let cfg = Rc::clone(&cfg_rc);
+                    let status = status_rc.clone();
+                    let clicked = clicked_ll;
+                    let left_da = left_da_rc.clone();
+                    let right_da = right_da_rc.clone();
+                    let pop = popover.clone();
+                    add_location_btn.connect_clicked(move |_| {
+                        show_location_editor_dialog(
+                            "New",
+                            clicked.lat,
+                            clicked.lon,
+                            Rc::clone(&cfg),
+                            status.clone(),
+                            left_da.clone(),
+                            right_da.clone(),
+                        );
+                        pop.popdown();
+                    });
+                }
+                {
+                    let cfg = Rc::clone(&cfg_rc);
+                    let status = status_rc.clone();
+                    let clicked = clicked_ll;
+                    let left_da = left_da_rc.clone();
+                    let right_da = right_da_rc.clone();
+                    let pop = popover.clone();
+                    remove_marker_btn.connect_clicked(move |_| {
+                        let removed = {
+                            let mut cfg = cfg.borrow_mut();
+                            remove_nearest_track_point(&mut cfg, &clicked, 40.0)
+                        };
+                        if removed {
+                            status.set_text("Removed nearest marker");
+                        } else {
+                            status.set_text("No marker near cursor");
+                        }
+                        left_da.queue_draw();
+                        right_da.queue_draw();
+                        pop.popdown();
+                    });
+                }
+                {
+                    let cfg = Rc::clone(&cfg_rc);
+                    let status = status_rc.clone();
+                    let left_da = left_da_rc.clone();
+                    let right_da = right_da_rc.clone();
+                    let pop = popover.clone();
+                    clear_track_btn.connect_clicked(move |_| {
+                        let cleared = {
+                            let mut cfg = cfg.borrow_mut();
+                            clear_active_track(&mut cfg)
+                        };
+                        if cleared {
+                            status.set_text("Cleared active track");
+                        } else {
+                            status.set_text("No active track markers to clear");
+                        }
+                        left_da.queue_draw();
+                        right_da.queue_draw();
+                        pop.popdown();
+                    });
+                }
+
+                for btn in [
+                    &inspect_btn,
+                    &re_center_btn,
+                    &add_location_btn,
+                    &add_marker_btn,
+                    &remove_marker_btn,
+                    &clear_track_btn,
+                ] {
+                    menu.append(btn);
+                }
+                popover.set_child(Some(&menu));
+                popover.popup();
+            });
+            da.add_controller(rightclick);
+        };
+    wire_nav_events(&left_da, true, Rc::clone(&change_site_fn));
+    wire_nav_events(&right_da, false, Rc::clone(&change_site_fn));
 
     {
         let sync_fn = sync_zoom_pan.clone();
@@ -987,79 +1108,12 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
     }
 
     {
-        let left_state_c = Rc::clone(&left_state);
-        let right_state_c = Rc::clone(&right_state);
-        let left_da_c = left_da.clone();
-        let right_da_c = right_da.clone();
-        let cfg_c = Rc::clone(&shared_cfg);
-        let pane_count_c = Rc::clone(&pane_count);
-        let anim_running_c = Rc::clone(&anim_running);
-        let anim_timer_c = Rc::clone(&anim_timer);
-        let anim_btn_c = anim_btn.clone();
-        let status_c = status.clone();
-        let tilt_combo_c = tilt_combo.clone();
-        let site_ids_c = site_ids.clone();
-        let btns = vec![refresh_btn.clone(), anim_btn.clone()];
-        site_combo.connect_selected_notify(move |combo| {
-            let id = site_ids_c[combo.selected() as usize].clone();
-            stop_animation(&anim_running_c, &anim_timer_c);
-            anim_btn_c.set_label("▶ Animate");
-            {
-                let mut cfg = cfg_c.borrow_mut();
-                cfg.radar_site = id.clone();
-                cfg.radar_zoom = 1.0;
-                cfg.radar_center_lat = 0.0;
-                cfg.radar_center_lon = 0.0;
-            }
-            for st in [&left_state_c, &right_state_c] {
-                let mut st = st.borrow_mut();
-                st.site_id = id.clone();
-                st.clear_cache();
-                if let Some(loc) = sites::site_latlon(&id) {
-                    let w = st.viewport.width;
-                    let h = st.viewport.height;
-                    st.viewport = Viewport::new(loc, w, h);
-                }
-            }
-            trigger_load(
-                Rc::clone(&left_state_c),
-                left_da_c.clone(),
-                status_c.clone(),
-                btns.clone(),
-                tilt_combo_c.clone(),
-            );
-            refresh_warnings(
-                Rc::clone(&left_state_c),
-                left_da_c.clone(),
-                Rc::clone(&cfg_c),
-            );
-            refresh_storm_tracks(
-                Rc::clone(&left_state_c),
-                left_da_c.clone(),
-                Rc::clone(&cfg_c),
-            );
-            if pane_count_c.get() == 2 {
-                trigger_load(
-                    Rc::clone(&right_state_c),
-                    right_da_c.clone(),
-                    status_c.clone(),
-                    btns.clone(),
-                    tilt_combo_c.clone(),
-                );
-                refresh_warnings(
-                    Rc::clone(&right_state_c),
-                    right_da_c.clone(),
-                    Rc::clone(&cfg_c),
-                );
-                refresh_storm_tracks(
-                    Rc::clone(&right_state_c),
-                    right_da_c.clone(),
-                    Rc::clone(&cfg_c),
-                );
-            }
-            left_da_c.queue_draw();
-            right_da_c.queue_draw();
-        });
+        {
+            let apply_site_change = Rc::clone(&apply_site_change);
+            site_combo.connect_selected_notify(move |combo| {
+                apply_site_change(combo.selected() as usize);
+            });
+        }
     }
 
     {
@@ -1718,15 +1772,6 @@ pub fn build_radar_pane(shared_cfg: Rc<RefCell<Config>>) -> (GBox, Rc<dyn Fn(&st
         });
     }
 
-    let change_site_fn: Rc<dyn Fn(&str)> = {
-        let site_combo = site_combo.clone();
-        let site_ids = site_ids.clone();
-        Rc::new(move |site_id: &str| {
-            if let Some(pos) = site_ids.iter().position(|id| id == site_id) {
-                site_combo.set_selected(pos as u32);
-            }
-        })
-    };
     (vbox, change_site_fn)
 }
 

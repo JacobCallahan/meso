@@ -1,5 +1,7 @@
 # Meso
 
+![Meso logo](media/logo.png)
+
 A professional-grade desktop weather application for Fedora Linux, written in Rust.
 Inspired by the [wX Android app](https://gitlab.com/joshua.tee/wx/), targeting weather
 enthusiasts and professionals who know what they're looking for.
@@ -88,6 +90,25 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 ## Building
 
+Prefer the `Makefile` workflows below for local development and installation.
+They keep build/install steps consistent and safely handle `meso-updraft`
+service replacement during installs.
+
+### Recommended local workflows (Makefile)
+
+```bash
+# Debug build + local install (~/.local/bin), with safe meso-updraft service replacement
+make install-dev
+
+# Release build + local install (~/.local/bin), with safe meso-updraft service replacement
+make install-release
+
+# Install/enable systemd user service for meso-updraft
+make service-setup
+```
+
+### Manual build steps (reference)
+
 ```bash
 git clone https://github.com/JacobCallahan/meso
 cd meso
@@ -128,7 +149,7 @@ Meso requires a running Wayland or X11 display session.
 All settings are accessible from the in-app **Settings** panel (gear icon in the
 toolbar). Configuration is persisted automatically when you close the application.
 
-The config file lives at `~/.config/Meso/config.toml` if you ever need to inspect
+The config file lives at `~/.config/meso/config.toml` if you ever need to inspect
 or reset it by hand (do so while the app is not running).
 
 Key settings areas in the Settings panel:
@@ -168,6 +189,14 @@ itself must be running separately (see below).
 
 A service unit template is provided at `data/meso-updraft.service`.
 
+Preferred workflow:
+
+```bash
+make service-setup
+```
+
+Manual equivalent:
+
 ```bash
 # Install the binary
 cp target/release/meso-updraft ~/.local/bin/
@@ -183,6 +212,10 @@ systemctl --user enable --now meso-updraft
 systemctl --user status meso-updraft
 journalctl --user -u meso-updraft -f
 ```
+
+For later binary updates, prefer `make install-dev` or `make install-release`
+instead of manually copying `meso-updraft`; these targets stop the service
+before replacement and restart it after.
 
 The daemon re-reads its configuration and subscriptions on every wake cycle, so
 no restart is needed after changing settings or subscriptions in Meso.

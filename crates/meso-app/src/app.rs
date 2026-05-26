@@ -221,8 +221,8 @@ fn build_window(app: &Application, config: &Config) {
         loc_btn.connect_clicked(move |_| {
             let cfg = Rc::clone(&shared_config);
             let csf = Rc::clone(&change_site_fn);
-            location_panel::show_location_panel(&window_c, cfg, move |site_id| {
-                csf(site_id);
+            location_panel::show_location_panel(&window_c, cfg, move |site_id, latlon| {
+                csf(site_id, latlon);
             });
         });
     }

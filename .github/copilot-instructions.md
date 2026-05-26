@@ -20,7 +20,7 @@ cargo check -p meso-render
 cargo check -p meso-updraft
 ```
 
-There are no automated tests in this repo; verify behavior by running the app.
+There are automated tests in this repo; verify behavior by running them. Contribute new tests for significant net-new functionality.
 
 Fedora system deps:
 
@@ -28,7 +28,7 @@ Fedora system deps:
 sudo dnf install gtk4-devel libadwaita-devel
 ```
 
-Config is persisted to `~/.config/Meso/config.toml` on exit. It is safe to hand-edit while the app is closed.
+Config is persisted to `~/.config/meso/config.toml` on exit. It is safe to hand-edit while the app is closed.
 
 ## Workspace
 
@@ -75,11 +75,10 @@ Config is persisted to `~/.config/Meso/config.toml` on exit. It is safe to hand-
 
 Treat items below as unimplemented until the code proves otherwise:
 
-- radar dual-pol products
 - radar mosaic / blended radar views
 - satellite overlays and RGB composites
-- RTMA and upper-air observation products
 - NHC / WPC dashboard expansion
+- Space weather products
 - dark-mode polish, status bar, and accessibility work
 - Flatpak / package distribution work
 
