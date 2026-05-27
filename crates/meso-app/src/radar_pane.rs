@@ -20,7 +20,7 @@ use gdk_pixbuf::Pixbuf;
 use gtk4::prelude::*;
 use gtk4::{
     Box as GBox, Button, DrawingArea, DropDown, Label, Orientation, Overlay, Popover, Scale,
-    SpinButton, StringList,
+    ScrolledWindow, SpinButton, StringList, TextView,
 };
 
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -80,6 +80,7 @@ struct RadarPaneState {
     l2_tilt_idx: usize,
     l2_tilts: Vec<meso_data::radar::level2::TiltInfo>,
     cached_l2_bytes: Option<Vec<u8>>, // decompressed bytes for current single frame
+    hovered_warning: Option<usize>,
 }
 
 impl RadarPaneState {
@@ -102,11 +103,14 @@ impl RadarPaneState {
         vp.zoom = cfg.radar_zoom.max(0.1);
         let mut overlays = OverlaySet::new();
         overlays.rings_visible = cfg.radar_show_rings;
+        overlays.roads_visible = cfg.radar_show_major_roads;
+        overlays.qc_hide_no_data = cfg.radar_qc_hide_no_data;
+        overlays.qc_mask_weak_echoes = cfg.radar_qc_mask_weak_echoes;
         RadarPaneState {
             site_id: cfg.radar_site.clone(),
             product: RadarProduct::from_code(product_code)
-                .filter(|p| p.is_map_supported())
-                .unwrap_or(RadarProduct::N0Q),
+                .filter(|p| p.is_map_supported() && p.supports_site(&cfg.radar_site))
+                .unwrap_or_else(|| fallback_product_for_site(&cfg.radar_site)),
             viewport: vp,
             overlays,
             warnings: Vec::new(),
@@ -129,6 +133,7 @@ impl RadarPaneState {
             l2_tilt_idx: 0,
             l2_tilts: Vec::new(),
             cached_l2_bytes: None,
+            hovered_warning: None,
         }
     }
 
@@ -163,6 +168,58 @@ impl RadarPaneState {
         false
     }
 
+    /// Re-render only the map (no radar quads) for immediate viewport feedback during zoom/pan.
+    fn render_map_to_pixbuf(&mut self) {
+        let map = Some(self.map_data.as_ref());
+        if let Ok(img) = cairo_render::render_map_only(&self.viewport, &self.overlays, map) {
+            let pb = rgba_to_pixbuf(&img);
+            self.current_pixbuf = Some(pb.clone());
+            // Keep animation playback in sync with the zoomed map immediately.
+            // Without this, the timer can swap in stale pre-zoom frames before
+            // the per-frame re-render catches up.
+            for slot in &mut self.anim_pixbufs {
+                *slot = pb.clone();
+            }
+        }
+    }
+
+    /// Re-render only the currently displayed animation frame for immediate viewport sync.
+    fn re_render_current_anim_frame(&mut self) {
+        let i = self.anim_index;
+        let map = Some(self.map_data.as_ref());
+        if let Some((l2, vel)) = self.anim_l2_frames.get(i) {
+            let code: u16 = if *vel { 99 } else { 94 };
+            let vel = *vel;
+            let palette = self.palette_registry.for_product(code);
+            if let Ok(img) =
+                cairo_render::render_level2(l2, palette, &self.viewport, &self.overlays, vel, map)
+            {
+                let pb = rgba_to_pixbuf(&img);
+                if let Some(slot) = self.anim_pixbufs.get_mut(i) {
+                    *slot = pb.clone();
+                }
+                self.current_pixbuf = Some(pb);
+            }
+        } else if let Some(l3) = self.anim_l3_frames.get(i) {
+            let is_vel = self.product.is_velocity();
+            let palette = self.palette_registry.for_product(l3.product_code);
+            if let Ok(img) = cairo_render::render_level3(
+                l3,
+                palette,
+                &self.viewport,
+                &self.overlays,
+                is_vel,
+                map,
+            ) {
+                let pb = rgba_to_pixbuf(&img);
+                if let Some(slot) = self.anim_pixbufs.get_mut(i) {
+                    *slot = pb.clone();
+                }
+                self.current_pixbuf = Some(pb);
+            }
+        }
+    }
+
     fn clear_cache(&mut self) {
         self.cached_l3 = None;
         self.cached_l2 = None;
@@ -175,6 +232,91 @@ impl RadarPaneState {
         self.anim_l2_frames.clear();
         self.anim_l3_frames.clear();
     }
+}
+
+fn filtered_group_products(group: &str, site_id: &str) -> Vec<RadarProduct> {
+    RadarProduct::for_group(group)
+        .into_iter()
+        .filter(|p| p.is_map_supported() && p.supports_site(site_id))
+        .collect()
+}
+
+fn available_product_groups(site_id: &str) -> Vec<&'static str> {
+    RadarProduct::PRODUCT_GROUPS
+        .iter()
+        .copied()
+        .filter(|group| !filtered_group_products(group, site_id).is_empty())
+        .collect()
+}
+
+fn fallback_product_for_site(site_id: &str) -> RadarProduct {
+    for group in available_product_groups(site_id) {
+        if let Some(prod) = filtered_group_products(group, site_id).into_iter().next() {
+            return prod;
+        }
+    }
+    RadarProduct::N0Q
+}
+
+fn reorder_sites_by_favorites(
+    all_sites: &[(String, String)],
+    favorites: &[String],
+) -> Vec<(String, String)> {
+    let mut out = all_sites.to_vec();
+    out.sort_by_key(|(id, _)| {
+        let fav_rank = favorites
+            .iter()
+            .position(|f| f.eq_ignore_ascii_case(id))
+            .unwrap_or(usize::MAX);
+        (fav_rank, id.clone())
+    });
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn populate_product_controls(
+    site_id: &str,
+    selected_code: &str,
+    group_combo: &DropDown,
+    prod_combo: &DropDown,
+    group_strings: &StringList,
+    group_names: &Rc<RefCell<Vec<&'static str>>>,
+    prod_strings: &StringList,
+    prod_codes: &Rc<RefCell<Vec<&'static str>>>,
+) {
+    let groups = available_product_groups(site_id);
+    let group_labels: Vec<&str> = groups.to_vec();
+    group_strings.splice(0, group_strings.n_items(), &group_labels);
+    *group_names.borrow_mut() = groups.clone();
+
+    if groups.is_empty() {
+        prod_strings.splice(0, prod_strings.n_items(), &[]);
+        prod_codes.borrow_mut().clear();
+        group_combo.set_selected(gtk4::INVALID_LIST_POSITION);
+        prod_combo.set_selected(gtk4::INVALID_LIST_POSITION);
+        return;
+    }
+
+    let selected = RadarProduct::from_code(selected_code)
+        .filter(|p| p.is_map_supported() && p.supports_site(site_id))
+        .unwrap_or_else(|| fallback_product_for_site(site_id));
+
+    let grp_pos = groups
+        .iter()
+        .position(|&g| g == selected.group_name())
+        .unwrap_or(0);
+    group_combo.set_selected(grp_pos as u32);
+
+    let selected_group = groups[grp_pos];
+    let products = filtered_group_products(selected_group, site_id);
+    let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
+    prod_strings.splice(0, prod_strings.n_items(), &labels);
+    *prod_codes.borrow_mut() = products.iter().map(|p| p.code()).collect();
+    let code_pos = products
+        .iter()
+        .position(|p| p.code() == selected.code())
+        .unwrap_or(0);
+    prod_combo.set_selected(code_pos as u32);
 }
 
 // ── Public widget builder ─────────────────────────────────────────────────────
@@ -207,6 +349,7 @@ pub fn build_radar_pane(
     let anim_running = Rc::new(Cell::new(false));
     let anim_timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
     let zoom_debounce: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+    let frame_idle: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
     let slider_updating: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let pending_center: Rc<Cell<Option<LatLon>>> = Rc::new(Cell::new(None));
 
@@ -217,62 +360,74 @@ pub fn build_radar_pane(
     toolbar.set_margin_start(4);
     toolbar.set_margin_end(4);
 
-    let sites_list = sites::all_sites();
+    let sites_list_all = sites::all_sites();
+    let sites_list = reorder_sites_by_favorites(
+        &sites_list_all,
+        &shared_cfg.borrow().radar_favorite_sites.clone(),
+    );
     let current_site = left_state.borrow().site_id.clone();
-    let site_combo = {
+    let site_strings = StringList::new(&[]);
+    let site_combo = DropDown::new(Some(site_strings.clone()), gtk4::Expression::NONE);
+    let site_ids: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(vec![]));
+    {
         let labels: Vec<String> = sites_list
             .iter()
             .map(|(id, name)| format!("{id} - {name}"))
             .collect();
-        let combo = DropDown::from_strings(&labels.iter().map(String::as_str).collect::<Vec<_>>());
-        let active_idx = sites_list
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        site_strings.splice(0, site_strings.n_items(), &label_refs);
+        *site_ids.borrow_mut() = sites_list.iter().map(|(id, _)| id.clone()).collect();
+        let active_idx = site_ids
+            .borrow()
             .iter()
-            .position(|(id, _)| *id == current_site)
+            .position(|id| id == &current_site)
             .unwrap_or(0);
-        combo.set_selected(active_idx as u32);
-        combo
-    };
-    let site_ids: Vec<String> = sites_list.iter().map(|(id, _)| id.clone()).collect();
+        site_combo.set_selected(active_idx as u32);
+    }
+    let favorite_site_btn = Button::with_label("☆");
+    favorite_site_btn.set_tooltip_text(Some("favorite"));
+    toolbar.append(&favorite_site_btn);
     site_combo.set_tooltip_text(Some("Select NEXRAD radar site"));
     toolbar.append(&site_combo);
+    let refresh_favorite_site_icon: Rc<dyn Fn()> = Rc::new({
+        let site_ids = Rc::clone(&site_ids);
+        let site_combo = site_combo.clone();
+        let favorite_site_btn = favorite_site_btn.clone();
+        let cfg = Rc::clone(&shared_cfg);
+        move || {
+            let selected_site = site_ids
+                .borrow()
+                .get(site_combo.selected() as usize)
+                .cloned()
+                .unwrap_or_default();
+            let is_favorite = cfg
+                .borrow()
+                .radar_favorite_sites
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(&selected_site));
+            favorite_site_btn.set_label(if is_favorite { "★" } else { "☆" });
+        }
+    });
+    refresh_favorite_site_icon();
 
     let active_label = Label::new(Some("L"));
     toolbar.append(&active_label);
 
-    let group_combo = DropDown::from_strings(RadarProduct::PRODUCT_GROUPS);
+    let group_strings = StringList::new(&[]);
+    let group_names: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(vec![]));
+    let group_combo = DropDown::new(Some(group_strings.clone()), gtk4::Expression::NONE);
     let prod_strings = StringList::new(&[]);
     let prod_codes: Rc<RefCell<Vec<&'static str>>> = Rc::new(RefCell::new(vec![]));
     let prod_combo = DropDown::new(Some(prod_strings.clone()), gtk4::Expression::NONE);
-    let populate_products = {
-        let prod_strings = prod_strings.clone();
-        let prod_codes = Rc::clone(&prod_codes);
-        move |group_combo: &DropDown, prod_combo: &DropDown, code: &str| {
-            let selected = RadarProduct::from_code(code)
-                .filter(|p| p.is_map_supported())
-                .unwrap_or(RadarProduct::N0Q);
-            let grp_pos = RadarProduct::PRODUCT_GROUPS
-                .iter()
-                .position(|&g| g == selected.group_name())
-                .unwrap_or(0);
-            group_combo.set_selected(grp_pos as u32);
-            let products: Vec<RadarProduct> = RadarProduct::for_group(selected.group_name())
-                .into_iter()
-                .filter(|p| p.is_map_supported())
-                .collect();
-            let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
-            prod_strings.splice(0, prod_strings.n_items(), &labels);
-            *prod_codes.borrow_mut() = products.iter().map(|p| p.code()).collect();
-            let code_pos = products
-                .iter()
-                .position(|p| p.code() == selected.code())
-                .unwrap_or(0);
-            prod_combo.set_selected(code_pos as u32);
-        }
-    };
-    populate_products(
+    populate_product_controls(
+        &current_site,
+        left_state.borrow().product.code(),
         &group_combo,
         &prod_combo,
-        left_state.borrow().product.code(),
+        &group_strings,
+        &group_names,
+        &prod_strings,
+        &prod_codes,
     );
     toolbar.append(&group_combo);
     toolbar.append(&prod_combo);
@@ -352,6 +507,10 @@ pub fn build_radar_pane(
         let active_label = active_label.clone();
         let group_combo = group_combo.clone();
         let prod_combo = prod_combo.clone();
+        let site_combo = site_combo.clone();
+        let site_ids = site_ids.clone();
+        let group_strings = group_strings.clone();
+        let group_names = Rc::clone(&group_names);
         let prod_strings = prod_strings.clone();
         let prod_codes = Rc::clone(&prod_codes);
         let left_state = Rc::clone(&left_state);
@@ -384,23 +543,21 @@ pub fn build_radar_pane(
             } else {
                 right_state.borrow().product
             };
-            let grp_pos = RadarProduct::PRODUCT_GROUPS
-                .iter()
-                .position(|&g| g == selected.group_name())
-                .unwrap_or(0);
-            group_combo.set_selected(grp_pos as u32);
-            let products: Vec<RadarProduct> = RadarProduct::for_group(selected.group_name())
-                .into_iter()
-                .filter(|p| p.is_map_supported())
-                .collect();
-            let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
-            prod_strings.splice(0, prod_strings.n_items(), &labels);
-            *prod_codes.borrow_mut() = products.iter().map(|p| p.code()).collect();
-            let code_pos = products
-                .iter()
-                .position(|p| p.code() == selected.code())
-                .unwrap_or(0);
-            prod_combo.set_selected(code_pos as u32);
+            let site_id = site_ids
+                .borrow()
+                .get(site_combo.selected() as usize)
+                .cloned()
+                .unwrap_or_else(|| "KTLX".to_string());
+            populate_product_controls(
+                &site_id,
+                selected.code(),
+                &group_combo,
+                &prod_combo,
+                &group_strings,
+                &group_names,
+                &prod_strings,
+                &prod_codes,
+            );
         })
     };
     set_active_ui(0);
@@ -471,14 +628,7 @@ pub fn build_radar_pane(
                 cr.move_to(x, y);
                 let _ = cr.show_text(ts);
             }
-            draw_major_roads(
-                cr,
-                w,
-                h,
-                &st.viewport,
-                st.map_data.as_ref(),
-                &cfg_draw.borrow(),
-            );
+            draw_hovered_warning(cr, &st);
             draw_location_markers(cr, w, h, &st.viewport, &cfg_draw.borrow());
             draw_custom_tracks(cr, w, h, &st.viewport, &cfg_draw.borrow());
         });
@@ -528,14 +678,7 @@ pub fn build_radar_pane(
                 cr.move_to(x, y);
                 let _ = cr.show_text(ts);
             }
-            draw_major_roads(
-                cr,
-                w,
-                h,
-                &st.viewport,
-                st.map_data.as_ref(),
-                &cfg_draw.borrow(),
-            );
+            draw_hovered_warning(cr, &st);
             draw_location_markers(cr, w, h, &st.viewport, &cfg_draw.borrow());
             draw_custom_tracks(cr, w, h, &st.viewport, &cfg_draw.borrow());
         });
@@ -554,15 +697,25 @@ pub fn build_radar_pane(
         let status = status.clone();
         let tilt_combo = tilt_combo.clone();
         let site_ids = site_ids.clone();
+        let set_active_ui = Rc::clone(&set_active_ui);
+        let active_slot = Rc::clone(&active_slot);
         let pending_center = Rc::clone(&pending_center);
         let btns = vec![refresh_btn.clone(), anim_btn.clone()];
 
         Rc::new(move |selected_idx: usize| {
-            let id = site_ids[selected_idx].clone();
+            let id = site_ids
+                .borrow()
+                .get(selected_idx)
+                .cloned()
+                .unwrap_or_else(|| "KTLX".to_string());
+            let current_site_id = left_state.borrow().site_id.clone();
+            let center_opt = pending_center.take();
+            if center_opt.is_none() && id == current_site_id {
+                return;
+            }
             stop_animation(&anim_running, &anim_timer);
             anim_btn.set_label("▶ Animate");
 
-            let center_opt = pending_center.take();
             let current_zoom = {
                 let st = left_state.borrow();
                 st.viewport.zoom
@@ -571,12 +724,11 @@ pub fn build_radar_pane(
             {
                 let mut cfg = cfg.borrow_mut();
                 cfg.radar_site = id.clone();
+                cfg.radar_zoom = current_zoom;
                 if let Some(center) = center_opt {
                     cfg.radar_center_lat = center.lat;
                     cfg.radar_center_lon = center.lon;
-                    cfg.radar_zoom = current_zoom;
                 } else {
-                    cfg.radar_zoom = 1.0;
                     cfg.radar_center_lat = 0.0;
                     cfg.radar_center_lon = 0.0;
                 }
@@ -584,18 +736,34 @@ pub fn build_radar_pane(
             for st in [&left_state, &right_state] {
                 let mut st = st.borrow_mut();
                 st.site_id = id.clone();
+                if !st.product.is_map_supported() || !st.product.supports_site(&id) {
+                    st.product = fallback_product_for_site(&id);
+                }
                 st.clear_cache();
                 if let Some(loc) = sites::site_latlon(&id) {
                     let w = st.viewport.width;
                     let h = st.viewport.height;
                     let mut vp = Viewport::new(loc, w, h);
+                    vp.zoom = current_zoom;
                     if let Some(center) = center_opt {
                         vp.center = center;
-                        vp.zoom = current_zoom;
                     }
                     st.viewport = vp;
                 }
             }
+            {
+                let left_prod = left_state.borrow().product.code().to_string();
+                let right_prod = right_state.borrow().product.code().to_string();
+                let mut cfg = cfg.borrow_mut();
+                cfg.radar_product_left = left_prod.clone();
+                cfg.radar_product_right = right_prod.clone();
+                cfg.radar_product = if active_slot.get() == 0 {
+                    left_prod
+                } else {
+                    right_prod
+                };
+            }
+            set_active_ui(active_slot.get());
             trigger_load(
                 Rc::clone(&left_state),
                 left_da.clone(),
@@ -628,7 +796,7 @@ pub fn build_radar_pane(
         let apply_site_change = Rc::clone(&apply_site_change);
         Rc::new(move |site_id: &str, latlon: Option<LatLon>| {
             pending_center.set(latlon);
-            if let Some(pos) = site_ids.iter().position(|id| id == site_id) {
+            if let Some(pos) = site_ids.borrow().iter().position(|id| id == site_id) {
                 if site_combo.selected() == pos as u32 {
                     apply_site_change(pos);
                 } else {
@@ -645,20 +813,29 @@ pub fn build_radar_pane(
         let right_da = right_da.clone();
         let cfg = Rc::clone(&shared_cfg);
         let debounce = Rc::clone(&zoom_debounce);
+        let frame_idle = Rc::clone(&frame_idle);
         move |mutator: &dyn Fn(&mut Viewport)| {
             let mut has_anim = false;
             {
                 let mut l = left_state.borrow_mut();
                 mutator(&mut l.viewport);
-                has_anim |= !l.anim_pixbufs.is_empty();
-                if !has_anim {
+                let l_has_anim = !l.anim_pixbufs.is_empty();
+                has_anim |= l_has_anim;
+                if l_has_anim {
+                    // Phase 1: show map immediately so the zoom feels instant.
+                    // The radar re-render is scheduled below via idle.
+                    l.render_map_to_pixbuf();
+                } else {
                     l.render_from_cache();
                 }
                 let mut r = right_state.borrow_mut();
                 r.viewport.center = l.viewport.center;
                 r.viewport.zoom = l.viewport.zoom;
-                has_anim |= !r.anim_pixbufs.is_empty();
-                if !has_anim {
+                let r_has_anim = !r.anim_pixbufs.is_empty();
+                has_anim |= r_has_anim;
+                if r_has_anim {
+                    r.render_map_to_pixbuf();
+                } else {
                     r.render_from_cache();
                 }
                 let mut cfg = cfg.borrow_mut();
@@ -669,6 +846,37 @@ pub fn build_radar_pane(
             left_da.queue_draw();
             right_da.queue_draw();
             if has_anim {
+                // Cancel any in-flight single-frame radar re-render.
+                if let Some(id) = frame_idle.borrow_mut().take() {
+                    id.remove();
+                }
+                // Phase 2: after the map draw completes, re-render the current
+                // animation frame to restore radar data at the new viewport.
+                let l = Rc::clone(&left_state);
+                let r = Rc::clone(&right_state);
+                let l_da = left_da.clone();
+                let r_da = right_da.clone();
+                let fi = Rc::clone(&frame_idle);
+                let id = glib::idle_add_local_once(move || {
+                    fi.borrow_mut().take();
+                    {
+                        let mut lst = l.borrow_mut();
+                        if !lst.anim_pixbufs.is_empty() {
+                            lst.re_render_current_anim_frame();
+                        }
+                    }
+                    {
+                        let mut rst = r.borrow_mut();
+                        if !rst.anim_pixbufs.is_empty() {
+                            rst.re_render_current_anim_frame();
+                        }
+                    }
+                    l_da.queue_draw();
+                    r_da.queue_draw();
+                });
+                *frame_idle.borrow_mut() = Some(id);
+
+                // Cancel and restart the all-frames debounce.
                 if let Some(id) = debounce.borrow_mut().take() {
                     id.remove();
                 }
@@ -779,6 +987,42 @@ pub fn build_radar_pane(
             }
             da.add_controller(drag);
 
+            let pane_state = if is_left {
+                Rc::clone(&left_state)
+            } else {
+                Rc::clone(&right_state)
+            };
+            let motion = gtk4::EventControllerMotion::new();
+            {
+                let pane_state = Rc::clone(&pane_state);
+                let da_motion = da.clone();
+                motion.connect_motion(move |_, x, y| {
+                    let clicked = {
+                        let st = pane_state.borrow();
+                        st.viewport.screen_to_latlon(x, y)
+                    };
+                    {
+                        let mut st = pane_state.borrow_mut();
+                        st.hovered_warning = st
+                            .warnings
+                            .iter()
+                            .enumerate()
+                            .find(|(_, w)| w.is_current && warning_bbox_contains(w, &clicked))
+                            .map(|(idx, _)| idx);
+                    }
+                    da_motion.queue_draw();
+                });
+            }
+            {
+                let pane_state = Rc::clone(&pane_state);
+                let da_motion = da.clone();
+                motion.connect_leave(move |_| {
+                    pane_state.borrow_mut().hovered_warning = None;
+                    da_motion.queue_draw();
+                });
+            }
+            da.add_controller(motion);
+
             let rightclick = gtk4::GestureClick::new();
             rightclick.set_button(3);
             let set_active = Rc::clone(&set_active_ui);
@@ -788,11 +1032,6 @@ pub fn build_radar_pane(
             let left_da_rc = left_da.clone();
             let right_da_rc = right_da.clone();
             let menu_parent = da.clone();
-            let pane_state = if is_left {
-                Rc::clone(&left_state)
-            } else {
-                Rc::clone(&right_state)
-            };
             rightclick.connect_pressed(move |gesture, _n, x, y| {
                 gesture.set_state(gtk4::EventSequenceState::Claimed);
                 set_active(slot);
@@ -831,12 +1070,12 @@ pub fn build_radar_pane(
 
                 {
                     let pane_state = Rc::clone(&pane_state);
-                    let status = status_rc.clone();
                     let clicked = clicked_ll;
                     let pop = popover.clone();
                     inspect_btn.connect_clicked(move |_| {
                         let st = pane_state.borrow();
-                        status.set_text(&build_inspect_message(&st, &clicked));
+                        let detail = build_inspect_report(&st, &clicked);
+                        show_inspect_popup("Radar Inspect", &detail);
                         pop.popdown();
                     });
                 }
@@ -1110,22 +1349,84 @@ pub fn build_radar_pane(
     {
         {
             let apply_site_change = Rc::clone(&apply_site_change);
+            let refresh_favorite_site_icon = refresh_favorite_site_icon.clone();
             site_combo.connect_selected_notify(move |combo| {
                 apply_site_change(combo.selected() as usize);
+                refresh_favorite_site_icon();
             });
         }
     }
 
     {
+        let shared_cfg = Rc::clone(&shared_cfg);
+        let site_strings = site_strings.clone();
+        let site_ids = Rc::clone(&site_ids);
+        let site_combo = site_combo.clone();
+        let favorite_site_btn = favorite_site_btn.clone();
+        favorite_site_btn.clone().connect_clicked(move |_| {
+            let selected_site = site_ids
+                .borrow()
+                .get(site_combo.selected() as usize)
+                .cloned()
+                .unwrap_or_default();
+            if selected_site.is_empty() {
+                return;
+            }
+            {
+                let mut cfg = shared_cfg.borrow_mut();
+                if let Some(idx) = cfg
+                    .radar_favorite_sites
+                    .iter()
+                    .position(|s| s.eq_ignore_ascii_case(&selected_site))
+                {
+                    cfg.radar_favorite_sites.remove(idx);
+                } else {
+                    cfg.radar_favorite_sites.push(selected_site.clone());
+                }
+                let reordered =
+                    reorder_sites_by_favorites(&sites::all_sites(), &cfg.radar_favorite_sites);
+                let labels: Vec<String> = reordered
+                    .iter()
+                    .map(|(id, name)| format!("{id} - {name}"))
+                    .collect();
+                let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+                site_strings.splice(0, site_strings.n_items(), &label_refs);
+                *site_ids.borrow_mut() = reordered.iter().map(|(id, _)| id.clone()).collect();
+            }
+            let selected_idx = site_ids
+                .borrow()
+                .iter()
+                .position(|id| id == &selected_site)
+                .unwrap_or(0);
+            site_combo.set_selected(selected_idx as u32);
+            let is_favorite = shared_cfg
+                .borrow()
+                .radar_favorite_sites
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(&selected_site));
+            favorite_site_btn.set_label(if is_favorite { "★" } else { "☆" });
+        });
+    }
+
+    {
         let combo = prod_combo.clone();
+        let site_ids_g = site_ids.clone();
+        let site_combo_g = site_combo.clone();
+        let group_names_g = Rc::clone(&group_names);
         let prod_strings_g = prod_strings.clone();
         let prod_codes_g = Rc::clone(&prod_codes);
         group_combo.connect_selected_notify(move |group_combo| {
-            let group = RadarProduct::PRODUCT_GROUPS[group_combo.selected() as usize];
-            let products: Vec<RadarProduct> = RadarProduct::for_group(group)
-                .into_iter()
-                .filter(|p| p.is_map_supported())
-                .collect();
+            let group = group_names_g
+                .borrow()
+                .get(group_combo.selected() as usize)
+                .copied()
+                .unwrap_or("Base Reflectivity");
+            let site_id = site_ids_g
+                .borrow()
+                .get(site_combo_g.selected() as usize)
+                .cloned()
+                .unwrap_or_else(|| "KTLX".to_string());
+            let products = filtered_group_products(group, &site_id);
             let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
             prod_strings_g.splice(0, prod_strings_g.n_items(), &labels);
             *prod_codes_g.borrow_mut() = products.iter().map(|p| p.code()).collect();
@@ -1146,12 +1447,21 @@ pub fn build_radar_pane(
         let anim_timer_c = Rc::clone(&anim_timer);
         let anim_btn_c = anim_btn.clone();
         let tilt_combo_c = tilt_combo.clone();
+        let site_ids_c = site_ids.clone();
+        let site_combo_c = site_combo.clone();
         let prod_codes_c = Rc::clone(&prod_codes);
         let btns = vec![refresh_btn.clone(), anim_btn.clone()];
         prod_combo.connect_selected_notify(move |combo| {
             let codes = prod_codes_c.borrow();
             if let Some(&code) = codes.get(combo.selected() as usize) {
-                if let Some(prod) = RadarProduct::from_code(code).filter(|p| p.is_map_supported()) {
+                let site_id = site_ids_c
+                    .borrow()
+                    .get(site_combo_c.selected() as usize)
+                    .cloned()
+                    .unwrap_or_else(|| "KTLX".to_string());
+                if let Some(prod) = RadarProduct::from_code(code)
+                    .filter(|p| p.is_map_supported() && p.supports_site(&site_id))
+                {
                     let slot = if pane_count_c.get() == 1 {
                         0
                     } else {
@@ -1214,6 +1524,7 @@ pub fn build_radar_pane(
         let btn = subscribe_btn.clone();
         let update_sub_btn = move || {
             let station = site_ids_sub
+                .borrow()
                 .get(site_sel.selected() as usize)
                 .cloned()
                 .unwrap_or_default();
@@ -1241,6 +1552,7 @@ pub fn build_radar_pane(
             let btn2 = subscribe_btn.clone();
             site_combo.connect_selected_notify(move |combo| {
                 let station = site_ids_2
+                    .borrow()
                     .get(combo.selected() as usize)
                     .cloned()
                     .unwrap_or_default();
@@ -1268,6 +1580,7 @@ pub fn build_radar_pane(
             let btn3 = subscribe_btn.clone();
             prod_combo.connect_selected_notify(move |combo| {
                 let station = site_ids_3
+                    .borrow()
                     .get(site_c3.selected() as usize)
                     .cloned()
                     .unwrap_or_default();
@@ -1296,6 +1609,7 @@ pub fn build_radar_pane(
             let btn4 = subscribe_btn.clone();
             subscribe_btn.connect_clicked(move |_| {
                 let station = site_ids_4
+                    .borrow()
                     .get(site_c4.selected() as usize)
                     .cloned()
                     .unwrap_or_default();
@@ -1460,6 +1774,9 @@ pub fn build_radar_pane(
                         st.overlays
                             .set_visible("storm_tracks", cfg.radar_show_storm_tracks);
                         st.overlays.rings_visible = cfg.radar_show_rings;
+                        st.overlays.roads_visible = cfg.radar_show_major_roads;
+                        st.overlays.qc_hide_no_data = cfg.radar_qc_hide_no_data;
+                        st.overlays.qc_mask_weak_echoes = cfg.radar_qc_mask_weak_echoes;
                         st.palette_ref = ref_name.clone();
                         st.palette_vel = vel_name.clone();
                         st.palette_registry = PaletteRegistry::with_names(&ref_name, &vel_name);
@@ -1471,6 +1788,9 @@ pub fn build_radar_pane(
                         st.overlays
                             .set_visible("storm_tracks", cfg.radar_show_storm_tracks);
                         st.overlays.rings_visible = cfg.radar_show_rings;
+                        st.overlays.roads_visible = cfg.radar_show_major_roads;
+                        st.overlays.qc_hide_no_data = cfg.radar_qc_hide_no_data;
+                        st.overlays.qc_mask_weak_echoes = cfg.radar_qc_mask_weak_echoes;
                         st.palette_ref = ref_name.clone();
                         st.palette_vel = vel_name.clone();
                         st.palette_registry = PaletteRegistry::with_names(&ref_name, &vel_name);
@@ -2898,32 +3218,164 @@ fn lookup_l3_gate(st: &RadarPaneState, range_km: f64, az: f64) -> Option<(String
     Some((label, dbz))
 }
 
-fn build_inspect_message(st: &RadarPaneState, clicked_ll: &LatLon) -> String {
+fn warning_bbox(w: &Warning) -> Option<(f64, f64, f64, f64)> {
+    let first = w.polygon.first()?;
+    let mut min_lat = first.lat;
+    let mut max_lat = first.lat;
+    let mut min_lon = first.lon;
+    let mut max_lon = first.lon;
+    for p in w.polygon.iter().skip(1) {
+        min_lat = min_lat.min(p.lat);
+        max_lat = max_lat.max(p.lat);
+        min_lon = min_lon.min(p.lon);
+        max_lon = max_lon.max(p.lon);
+    }
+    Some((min_lat, max_lat, min_lon, max_lon))
+}
+
+fn warning_bbox_contains(w: &Warning, clicked_ll: &LatLon) -> bool {
+    warning_bbox(w)
+        .map(|(min_lat, max_lat, min_lon, max_lon)| {
+            clicked_ll.lat >= min_lat
+                && clicked_ll.lat <= max_lat
+                && clicked_ll.lon >= min_lon
+                && clicked_ll.lon <= max_lon
+        })
+        .unwrap_or(false)
+}
+
+fn warnings_layer_visible(st: &RadarPaneState) -> bool {
+    st.overlays
+        .layers
+        .iter()
+        .find(|l| l.name == "warnings")
+        .map(|l| l.visible)
+        .unwrap_or(false)
+}
+
+fn warning_bbox_hits<'a>(st: &'a RadarPaneState, clicked_ll: &LatLon) -> Vec<&'a Warning> {
+    if !warnings_layer_visible(st) {
+        return Vec::new();
+    }
+    st.warnings
+        .iter()
+        .filter(|w| w.is_current && warning_bbox_contains(w, clicked_ll))
+        .collect()
+}
+
+fn build_inspect_report(st: &RadarPaneState, clicked_ll: &LatLon) -> String {
+    const CONE_OF_SILENCE_KM: f64 = 6.0;
+
     let site = &st.viewport.site_origin;
     let range_km = site.distance_km(clicked_ll);
     let az = bearing_deg(site.lat, site.lon, clicked_ll.lat, clicked_ll.lon);
     let gate_info = lookup_l2_gate(st, range_km, az).or_else(|| lookup_l3_gate(st, range_km, az));
+    let warning_hits = warning_bbox_hits(st, clicked_ll);
     let ns = if clicked_ll.lat >= 0.0 { 'N' } else { 'S' };
     let ew = if clicked_ll.lon >= 0.0 { 'E' } else { 'W' };
-    if let Some((label, value)) = gate_info {
-        format!(
-            "{:.3}°{ns} {:.3}°{ew}  Az:{:.0}°  Rng:{:.1}km  {}: {:.1}",
-            clicked_ll.lat.abs(),
-            clicked_ll.lon.abs(),
-            az,
-            range_km,
-            label,
-            value
-        )
-    } else {
-        format!(
-            "{:.3}°{ns} {:.3}°{ew}  Az:{:.0}°  Rng:{:.1}km  (no data)",
-            clicked_ll.lat.abs(),
-            clicked_ll.lon.abs(),
-            az,
-            range_km
-        )
+
+    let mut text = String::new();
+    text.push_str("Gate Inspect\n");
+    text.push_str(&format!(
+        "Lat/Lon: {:.3}°{ns} {:.3}°{ew}\nAzimuth: {:.0}°\nRange: {:.1} km\n",
+        clicked_ll.lat.abs(),
+        clicked_ll.lon.abs(),
+        az,
+        range_km
+    ));
+
+    match gate_info {
+        Some((label, value)) if label == "Vel" => {
+            text.push_str(&format!("Value: {label} {:.1} kt\n", value));
+        }
+        Some((label, value)) => {
+            text.push_str(&format!("Value: {label} {:.1} dBZ\n", value));
+        }
+        None => text.push_str("Value: no data\n"),
     }
+
+    text.push_str("\nWarnings / Watches (bbox hit)\n");
+    if !warnings_layer_visible(st) {
+        text.push_str("Warnings layer is hidden.\n");
+    } else if warning_hits.is_empty() {
+        text.push_str("No active warning/watch bbox at click location.\n");
+    } else {
+        for (idx, w) in warning_hits.iter().enumerate() {
+            text.push_str(&format!("{}. {}\n", idx + 1, w.event));
+            text.push_str(&format!("   Area: {}\n", w.area));
+            text.push_str(&format!("   Sender: {}\n", w.sender));
+            text.push_str(&format!("   Effective: {}\n", w.effective));
+            text.push_str(&format!("   Expires: {}\n", w.expires));
+            if !w.vtec.is_empty() {
+                text.push_str(&format!("   VTEC: {}\n", w.vtec));
+            }
+            if !w.url.is_empty() {
+                text.push_str(&format!("   URL: {}\n", w.url));
+            }
+        }
+    }
+
+    if range_km <= CONE_OF_SILENCE_KM {
+        let site_name = sites::site_name(&st.site_id).unwrap_or("Unknown");
+        let radar_type = if sites::is_tdwr(&st.site_id) {
+            "TDWR"
+        } else {
+            "WSR-88D"
+        };
+        text.push_str("\nRadar Site (cone of silence)\n");
+        text.push_str(&format!("Site: {} ({})\n", st.site_id, site_name));
+        text.push_str(&format!("Type: {radar_type}\n"));
+        text.push_str(&format!("Site Lat/Lon: {:.3}, {:.3}\n", site.lat, site.lon));
+        if let Some(ts) = st
+            .anim_timestamps
+            .get(st.anim_index)
+            .cloned()
+            .or_else(|| st.timestamp_str.clone())
+        {
+            text.push_str(&format!("Data timestamp: {ts}\n"));
+        } else {
+            text.push_str("Data timestamp: unavailable\n");
+        }
+        text.push_str("Operational status: unknown (live status not integrated)\n");
+    }
+
+    text
+}
+
+fn show_inspect_popup(title: &str, content: &str) {
+    let win = gtk4::Window::new();
+    win.set_title(Some(title));
+    win.set_modal(true);
+    win.set_default_size(620, 460);
+
+    let root = GBox::new(Orientation::Vertical, 8);
+    root.set_margin_top(10);
+    root.set_margin_bottom(10);
+    root.set_margin_start(10);
+    root.set_margin_end(10);
+
+    let scroll = ScrolledWindow::new();
+    scroll.set_hexpand(true);
+    scroll.set_vexpand(true);
+    let body = TextView::new();
+    body.set_editable(false);
+    body.set_cursor_visible(false);
+    body.set_monospace(true);
+    body.set_wrap_mode(gtk4::WrapMode::WordChar);
+    body.buffer().set_text(content);
+    scroll.set_child(Some(&body));
+
+    let close_btn = Button::with_label("Close");
+    close_btn.set_halign(gtk4::Align::End);
+    {
+        let win_c = win.clone();
+        close_btn.connect_clicked(move |_| win_c.close());
+    }
+
+    root.append(&scroll);
+    root.append(&close_btn);
+    win.set_child(Some(&root));
+    win.present();
 }
 
 fn ensure_active_track_index(cfg: &mut Config) -> usize {
@@ -3177,49 +3629,6 @@ fn state_from_lat_lon(lat: f64, lon: f64) -> String {
     "US".to_string()
 }
 
-fn draw_major_roads(
-    cr: &gtk4::cairo::Context,
-    w: i32,
-    h: i32,
-    viewport: &meso_render::viewport::Viewport,
-    map_data: &MapData,
-    cfg: &crate::config::Config,
-) {
-    if !cfg.radar_show_major_roads {
-        return;
-    }
-
-    let width = w as f64;
-    let height = h as f64;
-    let margin = 24.0_f64;
-
-    cr.set_source_rgba(0.96, 0.96, 0.96, 0.85);
-    cr.set_line_width(0.9);
-
-    for seg in &map_data.roads_major {
-        let (x1, y1) = viewport.latlon_to_screen(&LatLon {
-            lat: seg.lat1 as f64,
-            lon: seg.lon1 as f64,
-        });
-        let (x2, y2) = viewport.latlon_to_screen(&LatLon {
-            lat: seg.lat2 as f64,
-            lon: seg.lon2 as f64,
-        });
-
-        let min_x = x1.min(x2);
-        let max_x = x1.max(x2);
-        let min_y = y1.min(y2);
-        let max_y = y1.max(y2);
-        if max_x < -margin || min_x > width + margin || max_y < -margin || min_y > height + margin {
-            continue;
-        }
-
-        cr.move_to(x1, y1);
-        cr.line_to(x2, y2);
-    }
-    let _ = cr.stroke();
-}
-
 fn draw_location_markers(
     cr: &gtk4::cairo::Context,
     w: i32,
@@ -3271,6 +3680,67 @@ fn draw_location_markers(
         cr.move_to(lx, ly);
         let _ = cr.show_text(&loc.name);
     }
+}
+
+fn draw_hovered_warning(cr: &gtk4::cairo::Context, st: &RadarPaneState) {
+    let warnings_visible = st
+        .overlays
+        .layers
+        .iter()
+        .find(|l| l.name == "warnings")
+        .map(|l| l.visible)
+        .unwrap_or(false);
+    if !warnings_visible {
+        return;
+    }
+    let Some(idx) = st.hovered_warning else {
+        return;
+    };
+    let Some(w) = st.warnings.get(idx) else {
+        return;
+    };
+    if !w.is_current || w.polygon.is_empty() {
+        return;
+    }
+
+    cr.set_source_rgba(1.0, 1.0, 0.0, 0.95);
+    cr.set_line_width(3.0);
+    let mut first = true;
+    for pt in &w.polygon {
+        let (x, y) = st.viewport.latlon_to_screen(pt);
+        if first {
+            cr.move_to(x, y);
+            first = false;
+        } else {
+            cr.line_to(x, y);
+        }
+    }
+    if !first {
+        cr.close_path();
+        let _ = cr.stroke();
+    }
+
+    cr.select_font_face(
+        "Monospace",
+        gtk4::cairo::FontSlant::Normal,
+        gtk4::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(12.0);
+    let text = format!("Hovered: {}", w.event);
+    let x = 10.0_f64;
+    let y = 40.0_f64;
+    cr.set_source_rgba(0.0, 0.0, 0.0, 0.85);
+    for dx in [-1.0_f64, 0.0, 1.0] {
+        for dy in [-1.0_f64, 0.0, 1.0] {
+            if dx != 0.0 || dy != 0.0 {
+                cr.move_to(x + dx, y + dy);
+                let _ = cr.show_text(&text);
+            }
+        }
+    }
+    cr.set_source_rgb(1.0, 1.0, 0.0);
+    cr.move_to(x, y);
+    let _ = cr.show_text(&text);
 }
 
 fn marker_time_minutes(point: &RadarTrackPoint) -> Option<i64> {

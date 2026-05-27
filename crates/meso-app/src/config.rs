@@ -69,10 +69,10 @@ fn default_conus() -> String {
 fn default_false() -> bool {
     false
 }
-
 fn default_true() -> bool {
     true
 }
+
 fn default_cache_radar_hours() -> u32 {
     24
 }
@@ -158,6 +158,9 @@ pub struct Config {
     /// Favorited sounding station IDs
     #[serde(default)]
     pub sounding_favorites: Vec<String>,
+    /// Favorited radar site IDs (shown at top of radar site list)
+    #[serde(default)]
+    pub radar_favorite_sites: Vec<String>,
     /// Last selected sounding station ID
     #[serde(default)]
     pub sounding_last_site: String,
@@ -208,6 +211,12 @@ pub struct Config {
     /// Show major roads (interstates/highways) on radar
     #[serde(default = "default_false")]
     pub radar_show_major_roads: bool,
+    /// Hide no-data radar bins (value 0)
+    #[serde(default = "default_true")]
+    pub radar_qc_hide_no_data: bool,
+    /// Mask weak reflectivity echoes (approx low-SNR suppression)
+    #[serde(default = "default_false")]
+    pub radar_qc_mask_weak_echoes: bool,
     /// Custom user-defined radar tracking tracks
     #[serde(default)]
     pub radar_tracks: Vec<RadarTrack>,
@@ -273,6 +282,7 @@ impl Default for Config {
             model_favorites: Vec::new(),
             obs_favorites: Vec::new(),
             sounding_favorites: Vec::new(),
+            radar_favorite_sites: Vec::new(),
             sounding_last_site: String::new(),
             soundings_pane_position: -1,
             national_pane_position: -1,
@@ -289,6 +299,8 @@ impl Default for Config {
             radar_show_rings: true,
             radar_show_storm_tracks: true,
             radar_show_major_roads: false,
+            radar_qc_hide_no_data: true,
+            radar_qc_mask_weak_echoes: false,
             radar_tracks: Vec::new(),
             radar_active_track_id: default_radar_active_track_id(),
             radar_show_track_points: true,

@@ -96,6 +96,8 @@ pub fn level2_to_quads(
     palette: &ColorPalette,
     viewport: &Viewport,
     is_velocity: bool,
+    hide_no_data: bool,
+    mask_weak_echoes: bool,
 ) -> QuadBuffer {
     let num_radials = data.azimuths.len();
     if num_radials == 0 {
@@ -134,10 +136,12 @@ pub fn level2_to_quads(
             if level == run_level {
                 run_count += 1;
             } else {
-                if run_count > 0 && run_level != 0 {
+                if run_count > 0
+                    && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes)
+                {
                     let r0 = run_start_km;
                     let r1 = r0 + run_count as f64 * bin_size;
-                    let color = palette.color(run_level);
+                    let color = gate_color(run_level, palette);
                     emit_quad_km(&mut buf, r0, r1, cos0, sin0, cos1, sin1, color, viewport);
                 }
                 run_level = level;
@@ -145,10 +149,10 @@ pub fn level2_to_quads(
                 run_count = 1;
             }
         }
-        if run_count > 0 && run_level != 0 {
+        if run_count > 0 && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes) {
             let r0 = run_start_km;
             let r1 = r0 + run_count as f64 * bin_size;
-            let color = palette.color(run_level);
+            let color = gate_color(run_level, palette);
             emit_quad_km(&mut buf, r0, r1, cos0, sin0, cos1, sin1, color, viewport);
         }
     }
@@ -162,9 +166,18 @@ pub fn level3_to_quads(
     palette: &ColorPalette,
     viewport: &Viewport,
     is_velocity: bool,
+    hide_no_data: bool,
+    mask_weak_echoes: bool,
 ) -> QuadBuffer {
     if data.is_raster {
-        return level3_raster_to_quads(data, palette, viewport);
+        return level3_raster_to_quads(
+            data,
+            palette,
+            viewport,
+            is_velocity,
+            hide_no_data,
+            mask_weak_echoes,
+        );
     }
 
     let num_radials = data.num_radials;
@@ -206,10 +219,12 @@ pub fn level3_to_quads(
             if level == run_level {
                 run_count += 1;
             } else {
-                if run_count > 0 && run_level != 0 {
+                if run_count > 0
+                    && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes)
+                {
                     let r0 = run_start_km;
                     let r1 = r0 + run_count as f64 * bin_size;
-                    let color = palette.color(run_level);
+                    let color = gate_color(run_level, palette);
                     emit_quad_km(&mut buf, r0, r1, cos0, sin0, cos1, sin1, color, viewport);
                 }
                 run_level = level;
@@ -217,10 +232,10 @@ pub fn level3_to_quads(
                 run_count = 1;
             }
         }
-        if run_count > 0 && run_level != 0 {
+        if run_count > 0 && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes) {
             let r0 = run_start_km;
             let r1 = r0 + run_count as f64 * bin_size;
-            let color = palette.color(run_level);
+            let color = gate_color(run_level, palette);
             emit_quad_km(&mut buf, r0, r1, cos0, sin0, cos1, sin1, color, viewport);
         }
     }
@@ -233,6 +248,9 @@ fn level3_raster_to_quads(
     data: &Level3Data,
     palette: &ColorPalette,
     viewport: &Viewport,
+    is_velocity: bool,
+    hide_no_data: bool,
+    mask_weak_echoes: bool,
 ) -> QuadBuffer {
     let rows = data.num_radials;
     let cols = data.num_range_bins;
@@ -248,7 +266,7 @@ fn level3_raster_to_quads(
     for row in 0..rows {
         for col in 0..cols {
             let level = data.bins[row * cols + col];
-            if level == 0 {
+            if !gate_visible(level, is_velocity, hide_no_data, mask_weak_echoes) {
                 continue;
             }
 
@@ -265,7 +283,7 @@ fn level3_raster_to_quads(
             let (x1, y1) = viewport.radar_km_to_screen(x1_km, y1_km);
             let (x2, y2) = viewport.radar_km_to_screen(x2_km, y2_km);
             let (x3, y3) = viewport.radar_km_to_screen(x3_km, y3_km);
-            let color = palette.color(level);
+            let color = gate_color(level, palette);
 
             buf.push_quad(
                 (x0 as f32, y0 as f32),
@@ -278,6 +296,29 @@ fn level3_raster_to_quads(
     }
 
     buf
+}
+
+#[inline]
+fn gate_visible(level: u8, is_velocity: bool, hide_no_data: bool, mask_weak_echoes: bool) -> bool {
+    if level == 0 && hide_no_data {
+        return false;
+    }
+    if mask_weak_echoes && !is_velocity {
+        let dbz = level as f64 / 2.0 - 32.0;
+        if dbz < 5.0 {
+            return false;
+        }
+    }
+    true
+}
+
+#[inline]
+fn gate_color(level: u8, palette: &ColorPalette) -> (u8, u8, u8) {
+    if level == 0 {
+        (18, 18, 18)
+    } else {
+        palette.color(level)
+    }
 }
 
 #[inline]
