@@ -51,6 +51,17 @@ pub fn show_overlay_dialog(
     chk_rings.set_active(shared_cfg.borrow().radar_show_rings);
     content.append(&chk_rings);
 
+    let chk_hide_no_data = CheckButton::with_label("Hide No-Data Bins");
+    chk_hide_no_data.set_active(shared_cfg.borrow().radar_qc_hide_no_data);
+    content.append(&chk_hide_no_data);
+
+    let chk_mask_weak = CheckButton::with_label("Mask Weak Echoes");
+    chk_mask_weak.set_tooltip_text(Some(
+        "Approximate low-SNR suppression for weak reflectivity",
+    ));
+    chk_mask_weak.set_active(shared_cfg.borrow().radar_qc_mask_weak_echoes);
+    content.append(&chk_mask_weak);
+
     let chk_track_points = CheckButton::with_label("Show Custom Track Points");
     chk_track_points.set_active(shared_cfg.borrow().radar_show_track_points);
     content.append(&chk_track_points);
@@ -121,6 +132,8 @@ pub fn show_overlay_dialog(
             cfg.radar_show_storm_tracks = chk_tracks.is_active();
             cfg.radar_show_major_roads = chk_major_roads.is_active();
             cfg.radar_show_rings = chk_rings.is_active();
+            cfg.radar_qc_hide_no_data = chk_hide_no_data.is_active();
+            cfg.radar_qc_mask_weak_echoes = chk_mask_weak.is_active();
             cfg.radar_show_track_points = chk_track_points.is_active();
             cfg.radar_show_track_lines = chk_track_lines.is_active();
             cfg.radar_show_track_vector = chk_track_vector.is_active();

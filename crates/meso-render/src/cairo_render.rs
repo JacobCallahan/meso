@@ -35,7 +35,14 @@ pub fn render_level2(
     is_velocity: bool,
     map: Option<&MapData>,
 ) -> Result<RenderedImage> {
-    let quads = level2_to_quads(data, palette, viewport, is_velocity);
+    let quads = level2_to_quads(
+        data,
+        palette,
+        viewport,
+        is_velocity,
+        overlays.qc_hide_no_data,
+        overlays.qc_mask_weak_echoes,
+    );
     render_quads_cairo(&quads, viewport, overlays, map)
 }
 
@@ -48,8 +55,68 @@ pub fn render_level3(
     is_velocity: bool,
     map: Option<&MapData>,
 ) -> Result<RenderedImage> {
-    let quads = level3_to_quads(data, palette, viewport, is_velocity);
+    let quads = level3_to_quads(
+        data,
+        palette,
+        viewport,
+        is_velocity,
+        overlays.qc_hide_no_data,
+        overlays.qc_mask_weak_echoes,
+    );
     render_quads_cairo(&quads, viewport, overlays, map)
+}
+
+/// Render only the map layer (no radar quads) — used for immediate viewport feedback
+/// while radar frames are re-rendered in the background after a zoom or pan.
+pub fn render_map_only(
+    viewport: &Viewport,
+    overlays: &OverlaySet,
+    map: Option<&MapData>,
+) -> Result<RenderedImage> {
+    let w = viewport.width as i32;
+    let h = viewport.height as i32;
+    let mut surface = ImageSurface::create(Format::ARgb32, w, h)?;
+    {
+        let ctx = Context::new(&surface)?;
+
+        ctx.set_source_rgb(0.0, 0.0, 0.0);
+        ctx.paint()?;
+
+        let (site_sx, site_sy) = viewport.latlon_to_screen(&viewport.site_origin);
+        let ppkm = viewport.pixels_per_km();
+
+        if overlays.rings_visible {
+            for ring in &overlays.range_rings {
+                let (r, g, b) = ring.color;
+                ctx.set_source_rgba(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 0.5);
+                ctx.set_line_width(ring.line_width as f64);
+                let radius_px = ring.radius_km * ppkm;
+                ctx.arc(site_sx, site_sy, radius_px, 0.0, 2.0 * std::f64::consts::PI);
+                ctx.stroke()?;
+            }
+        }
+
+        if let Some(map) = map {
+            draw_map_cairo(&ctx, map, viewport, overlays.roads_visible)?;
+        }
+    }
+    // Convert Cairo ARGB32 (premultiplied BGRA, native byte order) → RGBA
+    let data_surf = surface.data()?;
+    let mut out = RenderedImage::new(viewport.width, viewport.height);
+    for (i, chunk) in data_surf.chunks(4).enumerate() {
+        let b = chunk[0];
+        let g = chunk[1];
+        let r = chunk[2];
+        let a = chunk[3];
+        let idx = i * 4;
+        if idx + 3 < out.data.len() {
+            out.data[idx] = r;
+            out.data[idx + 1] = g;
+            out.data[idx + 2] = b;
+            out.data[idx + 3] = a;
+        }
+    }
+    Ok(out)
 }
 
 // ── Internal implementation ───────────────────────────────────────────────────
@@ -117,9 +184,9 @@ fn render_quads_cairo(
             }
         }
 
-        // Draw map layers (counties, states, lakes, cities)
+        // Draw map layers (counties, states, lakes, roads, cities)
         if let Some(map) = map {
-            draw_map_cairo(&ctx, map, viewport)?;
+            draw_map_cairo(&ctx, map, viewport, overlays.roads_visible)?;
         }
 
         // Draw visible overlay layers
@@ -253,7 +320,12 @@ fn draw_polyline_cairo(ctx: &Context, poly: &Polyline, viewport: &Viewport) -> R
 }
 
 /// Draw all map geometry layers (counties, states, lakes, cities) using Cairo.
-fn draw_map_cairo(ctx: &Context, map: &MapData, viewport: &Viewport) -> Result<()> {
+fn draw_map_cairo(
+    ctx: &Context,
+    map: &MapData,
+    viewport: &Viewport,
+    roads_visible: bool,
+) -> Result<()> {
     let w = viewport.width as f64;
     let h = viewport.height as f64;
 
@@ -309,6 +381,13 @@ fn draw_map_cairo(ctx: &Context, map: &MapData, viewport: &Viewport) -> Result<(
     ctx.set_source_rgba(0.4, 0.6, 0.9, 0.85);
     ctx.set_line_width(1.0);
     draw_segments(ctx, &map.lakes)?;
+
+    // Major roads — bright gray/white, drawn on top of water features
+    if roads_visible {
+        ctx.set_source_rgba(0.96, 0.96, 0.96, 0.85);
+        ctx.set_line_width(0.9);
+        draw_segments(ctx, &map.roads_major)?;
+    }
 
     // City labels — LOD tuned by zoom (more/smaller towns as users zoom in)
     let zoom = viewport.zoom;

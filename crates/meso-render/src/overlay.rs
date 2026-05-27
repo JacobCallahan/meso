@@ -125,6 +125,9 @@ pub struct OverlaySet {
     pub layers: Vec<OverlayLayer>,
     pub range_rings: Vec<RangeRing>,
     pub rings_visible: bool,
+    pub roads_visible: bool,
+    pub qc_hide_no_data: bool,
+    pub qc_mask_weak_echoes: bool,
 }
 
 impl Default for OverlaySet {
@@ -139,6 +142,9 @@ impl OverlaySet {
             layers: Vec::new(),
             range_rings: default_range_rings(),
             rings_visible: true,
+            roads_visible: false,
+            qc_hide_no_data: true,
+            qc_mask_weak_echoes: false,
         }
     }
 

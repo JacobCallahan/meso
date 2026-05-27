@@ -533,6 +533,36 @@ impl RadarProduct {
         )
     }
 
+    /// True when this product can be requested/rendered for the given radar site.
+    pub fn supports_site(&self, site_id: &str) -> bool {
+        let site = site_id.trim().to_ascii_uppercase();
+        let is_tdwr_site = if site.len() == 4 {
+            site.starts_with('T')
+        } else {
+            crate::geo::sites::is_tdwr(&site)
+        };
+        let is_tdwr_product = matches!(
+            self,
+            Self::TR0
+                | Self::TR1
+                | Self::TR2
+                | Self::TR3
+                | Self::TV0
+                | Self::TV1
+                | Self::TV2
+                | Self::TV3
+                | Self::TZ0
+                | Self::TZ1
+                | Self::TZ2
+                | Self::TZL
+        );
+        if is_tdwr_site {
+            is_tdwr_product
+        } else {
+            !is_tdwr_product
+        }
+    }
+
     /// Returns the UI group name for this product.
     pub fn group_name(&self) -> &'static str {
         match self {
@@ -573,11 +603,14 @@ impl RadarProduct {
             Self::VIL | Self::DVL | Self::EET | Self::ET | Self::NCR | Self::NCZ => {
                 "Derived / VIL / QPE"
             }
+            Self::TR0 | Self::TR1 | Self::TR2 | Self::TR3 => "TDWR Reflectivity",
+            Self::TV0 | Self::TV1 | Self::TV2 | Self::TV3 => "TDWR Velocity",
+            Self::TZ0 | Self::TZ1 | Self::TZ2 | Self::TZL => "TDWR Super-Res Reflectivity",
             _ => "Other",
         }
     }
 
-    /// Returns products belonging to the named UI group (excludes TDWR).
+    /// Returns products belonging to the named UI group.
     pub fn for_group(group: &str) -> Vec<Self> {
         match group {
             "Level 2" => vec![Self::L2Reflectivity, Self::L2Velocity],
@@ -628,6 +661,9 @@ impl RadarProduct {
                 Self::EET,
                 Self::ET,
             ],
+            "TDWR Reflectivity" => vec![Self::TR0, Self::TR1, Self::TR2, Self::TR3],
+            "TDWR Velocity" => vec![Self::TV0, Self::TV1, Self::TV2, Self::TV3],
+            "TDWR Super-Res Reflectivity" => vec![Self::TZ0, Self::TZ1, Self::TZ2, Self::TZL],
             _ => Vec::new(),
         }
     }
@@ -640,6 +676,9 @@ impl RadarProduct {
         "Storm-Relative Velocity",
         "Dual-pol",
         "Derived / VIL / QPE",
+        "TDWR Reflectivity",
+        "TDWR Velocity",
+        "TDWR Super-Res Reflectivity",
     ];
 }
 
@@ -716,6 +755,16 @@ mod tests {
     #[test]
     fn for_group_unknown_is_empty() {
         assert!(RadarProduct::for_group("Nonexistent").is_empty());
+    }
+
+    #[test]
+    fn supports_site_distinguishes_wsr_and_tdwr() {
+        assert!(RadarProduct::L2Reflectivity.supports_site("TLX"));
+        assert!(!RadarProduct::TR0.supports_site("TLX"));
+        assert!(RadarProduct::L2Reflectivity.supports_site("KTLX"));
+        assert!(!RadarProduct::TR0.supports_site("KTLX"));
+        assert!(!RadarProduct::L2Reflectivity.supports_site("TDTW"));
+        assert!(RadarProduct::TR0.supports_site("TDTW"));
     }
 
     #[test]
