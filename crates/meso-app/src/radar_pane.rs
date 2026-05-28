@@ -16,7 +16,7 @@
  * Click-drag        → pan
  */
 
-use gdk_pixbuf::Pixbuf;
+use gtk4::cairo::ImageSurface;
 use gtk4::prelude::*;
 use gtk4::{
     Box as GBox, Button, DrawingArea, DropDown, Label, Orientation, Overlay, Popover, Scale,
@@ -61,16 +61,16 @@ struct RadarPaneState {
     palette_registry: PaletteRegistry,
     palette_ref: String,
     palette_vel: String,
-    map_data: Rc<MapData>,
+    map_data: Arc<MapData>,
     // Rendered display
-    current_pixbuf: Option<Pixbuf>,
+    current_surface: Option<ImageSurface>,
     // Timestamp for currently displayed frame (UTC formatted string)
     timestamp_str: Option<String>,
     // Decoded data cache (avoids re-downloading on zoom/pan)
     cached_l3: Option<Level3Data>,
     cached_l2: Option<(Level2Data, bool)>, // (data, is_velocity)
     // Animation
-    anim_pixbufs: Vec<Pixbuf>,
+    anim_surfaces: Vec<ImageSurface>,
     anim_timestamps: Vec<String>,
     anim_index: usize,
     // Decoded frames — kept for re-rendering on zoom/pan and palette change
@@ -81,10 +81,31 @@ struct RadarPaneState {
     l2_tilts: Vec<meso_data::radar::level2::TiltInfo>,
     cached_l2_bytes: Option<Vec<u8>>, // decompressed bytes for current single frame
     hovered_warning: Option<usize>,
+    drag_offset_x: f64,
+    drag_offset_y: f64,
+    active_zoom: f64,
+    zoom_center: (f64, f64),
+    anim_viewport_resync: bool,
+    anim_frame_stale: Vec<bool>,
+    anim_frame_inflight: Vec<bool>,
+    render_generation: u64,
+    map_cache_key: Option<MapCacheKey>,
+    cached_map_surface: Option<ImageSurface>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MapCacheKey {
+    width: u32,
+    height: u32,
+    center_lat: f64,
+    center_lon: f64,
+    zoom: f64,
+    roads_visible: bool,
+    rings_visible: bool,
 }
 
 impl RadarPaneState {
-    fn new(cfg: &Config, map_data: Rc<MapData>, product_code: &str) -> Self {
+    fn new(cfg: &Config, map_data: Arc<MapData>, product_code: &str) -> Self {
         let site_center = sites::site_latlon(&cfg.radar_site).unwrap_or(LatLon {
             lat: 35.47,
             lon: -97.52,
@@ -121,11 +142,11 @@ impl RadarPaneState {
             palette_ref: cfg.radar_palette_ref.clone(),
             palette_vel: cfg.radar_palette_vel.clone(),
             map_data,
-            current_pixbuf: None,
+            current_surface: None,
             timestamp_str: None,
             cached_l3: None,
             cached_l2: None,
-            anim_pixbufs: Vec::new(),
+            anim_surfaces: Vec::new(),
             anim_timestamps: Vec::new(),
             anim_index: 0,
             anim_l2_frames: Vec::new(),
@@ -134,7 +155,35 @@ impl RadarPaneState {
             l2_tilts: Vec::new(),
             cached_l2_bytes: None,
             hovered_warning: None,
+            drag_offset_x: 0.0,
+            drag_offset_y: 0.0,
+            active_zoom: 1.0,
+            zoom_center: (0.0, 0.0),
+            anim_viewport_resync: false,
+            anim_frame_stale: Vec::new(),
+            anim_frame_inflight: Vec::new(),
+            render_generation: 0,
+            map_cache_key: None,
+            cached_map_surface: None,
         }
+    }
+
+    fn map_cache_key(&self) -> MapCacheKey {
+        MapCacheKey {
+            width: self.viewport.width,
+            height: self.viewport.height,
+            center_lat: self.viewport.center.lat,
+            center_lon: self.viewport.center.lon,
+            zoom: self.viewport.zoom,
+            roads_visible: self.overlays.roads_visible,
+            rings_visible: self.overlays.rings_visible,
+        }
+    }
+
+    fn mark_anim_frames_stale(&mut self) {
+        let n = self.anim_surfaces.len();
+        self.anim_frame_stale = vec![true; n];
+        self.anim_frame_inflight = vec![false; n];
     }
 
     /// Re-render from cached decoded data at the current viewport.
@@ -147,7 +196,7 @@ impl RadarPaneState {
             if let Ok(img) =
                 cairo_render::render_level2(l2, palette, &self.viewport, &self.overlays, *vel, map)
             {
-                self.current_pixbuf = Some(rgba_to_pixbuf(&img));
+                self.current_surface = Some(img);
                 return true;
             }
         } else if let Some(l3) = &self.cached_l3 {
@@ -161,7 +210,7 @@ impl RadarPaneState {
                 is_vel,
                 map,
             ) {
-                self.current_pixbuf = Some(rgba_to_pixbuf(&img));
+                self.current_surface = Some(img);
                 return true;
             }
         }
@@ -170,53 +219,18 @@ impl RadarPaneState {
 
     /// Re-render only the map (no radar quads) for immediate viewport feedback during zoom/pan.
     fn render_map_to_pixbuf(&mut self) {
-        let map = Some(self.map_data.as_ref());
-        if let Ok(img) = cairo_render::render_map_only(&self.viewport, &self.overlays, map) {
-            let pb = rgba_to_pixbuf(&img);
-            self.current_pixbuf = Some(pb.clone());
-            // Keep animation playback in sync with the zoomed map immediately.
-            // Without this, the timer can swap in stale pre-zoom frames before
-            // the per-frame re-render catches up.
-            for slot in &mut self.anim_pixbufs {
-                *slot = pb.clone();
+        let key = self.map_cache_key();
+        if self.map_cache_key == Some(key) {
+            if let Some(surf) = &self.cached_map_surface {
+                self.current_surface = Some(surf.clone());
+                return;
             }
         }
-    }
-
-    /// Re-render only the currently displayed animation frame for immediate viewport sync.
-    fn re_render_current_anim_frame(&mut self) {
-        let i = self.anim_index;
         let map = Some(self.map_data.as_ref());
-        if let Some((l2, vel)) = self.anim_l2_frames.get(i) {
-            let code: u16 = if *vel { 99 } else { 94 };
-            let vel = *vel;
-            let palette = self.palette_registry.for_product(code);
-            if let Ok(img) =
-                cairo_render::render_level2(l2, palette, &self.viewport, &self.overlays, vel, map)
-            {
-                let pb = rgba_to_pixbuf(&img);
-                if let Some(slot) = self.anim_pixbufs.get_mut(i) {
-                    *slot = pb.clone();
-                }
-                self.current_pixbuf = Some(pb);
-            }
-        } else if let Some(l3) = self.anim_l3_frames.get(i) {
-            let is_vel = self.product.is_velocity();
-            let palette = self.palette_registry.for_product(l3.product_code);
-            if let Ok(img) = cairo_render::render_level3(
-                l3,
-                palette,
-                &self.viewport,
-                &self.overlays,
-                is_vel,
-                map,
-            ) {
-                let pb = rgba_to_pixbuf(&img);
-                if let Some(slot) = self.anim_pixbufs.get_mut(i) {
-                    *slot = pb.clone();
-                }
-                self.current_pixbuf = Some(pb);
-            }
+        if let Ok(img) = cairo_render::render_map_only(&self.viewport, &self.overlays, map) {
+            self.map_cache_key = Some(key);
+            self.cached_map_surface = Some(img.clone());
+            self.current_surface = Some(img);
         }
     }
 
@@ -224,13 +238,17 @@ impl RadarPaneState {
         self.cached_l3 = None;
         self.cached_l2 = None;
         self.cached_l2_bytes = None;
-        self.current_pixbuf = None;
+        self.current_surface = None;
         self.timestamp_str = None;
-        self.anim_pixbufs.clear();
+        self.anim_surfaces.clear();
         self.anim_timestamps.clear();
         self.anim_index = 0;
         self.anim_l2_frames.clear();
         self.anim_l3_frames.clear();
+        self.anim_frame_stale.clear();
+        self.anim_frame_inflight.clear();
+        self.cached_map_surface = None;
+        self.map_cache_key = None;
     }
 }
 
@@ -326,15 +344,15 @@ pub fn build_radar_pane(
     shared_cfg: Rc<RefCell<Config>>,
 ) -> (GBox, Rc<dyn Fn(&str, Option<LatLon>)>) {
     let cfg_snapshot = shared_cfg.borrow().clone();
-    let map_data = Rc::new(MapData::load());
+    let map_data = Arc::new(MapData::load());
     let left_state = Rc::new(RefCell::new(RadarPaneState::new(
         &cfg_snapshot,
-        Rc::clone(&map_data),
+        Arc::clone(&map_data),
         &cfg_snapshot.radar_product_left,
     )));
     let right_state = Rc::new(RefCell::new(RadarPaneState::new(
         &cfg_snapshot,
-        Rc::clone(&map_data),
+        Arc::clone(&map_data),
         &cfg_snapshot.radar_product_right,
     )));
 
@@ -349,7 +367,6 @@ pub fn build_radar_pane(
     let anim_running = Rc::new(Cell::new(false));
     let anim_timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
     let zoom_debounce: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
-    let frame_idle: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
     let slider_updating: Rc<Cell<bool>> = Rc::new(Cell::new(false));
     let pending_center: Rc<Cell<Option<LatLon>>> = Rc::new(Cell::new(None));
 
@@ -590,9 +607,21 @@ pub fn build_radar_pane(
             let st = state_draw.borrow();
             cr.set_source_rgb(0.0, 0.0, 0.0);
             let _ = cr.paint();
-            if let Some(pb) = &st.current_pixbuf {
-                cr.set_source_pixbuf(pb, 0.0, 0.0);
+            if let Some(pb) = &st.current_surface {
+                let _ = cr.save();
+                cr.translate(st.drag_offset_x, st.drag_offset_y);
+                if st.active_zoom != 1.0 {
+                    let (zx, zy) = st.zoom_center;
+                    cr.translate(zx, zy);
+                    cr.scale(st.active_zoom, st.active_zoom);
+                    cr.translate(-zx, -zy);
+                }
+                let _ = cr.set_source_surface(pb, 0.0, 0.0);
                 let _ = cr.paint();
+                draw_hovered_warning(cr, &st);
+                draw_location_markers(cr, w, h, &st.viewport, &cfg_draw.borrow());
+                draw_custom_tracks(cr, w, h, &st.viewport, &cfg_draw.borrow());
+                let _ = cr.restore();
             } else {
                 cr.set_source_rgb(0.4, 0.4, 0.4);
                 cr.select_font_face(
@@ -628,9 +657,6 @@ pub fn build_radar_pane(
                 cr.move_to(x, y);
                 let _ = cr.show_text(ts);
             }
-            draw_hovered_warning(cr, &st);
-            draw_location_markers(cr, w, h, &st.viewport, &cfg_draw.borrow());
-            draw_custom_tracks(cr, w, h, &st.viewport, &cfg_draw.borrow());
         });
     }
     {
@@ -640,9 +666,21 @@ pub fn build_radar_pane(
             let st = state_draw.borrow();
             cr.set_source_rgb(0.0, 0.0, 0.0);
             let _ = cr.paint();
-            if let Some(pb) = &st.current_pixbuf {
-                cr.set_source_pixbuf(pb, 0.0, 0.0);
+            if let Some(pb) = &st.current_surface {
+                let _ = cr.save();
+                cr.translate(st.drag_offset_x, st.drag_offset_y);
+                if st.active_zoom != 1.0 {
+                    let (zx, zy) = st.zoom_center;
+                    cr.translate(zx, zy);
+                    cr.scale(st.active_zoom, st.active_zoom);
+                    cr.translate(-zx, -zy);
+                }
+                let _ = cr.set_source_surface(pb, 0.0, 0.0);
                 let _ = cr.paint();
+                draw_hovered_warning(cr, &st);
+                draw_location_markers(cr, w, h, &st.viewport, &cfg_draw.borrow());
+                draw_custom_tracks(cr, w, h, &st.viewport, &cfg_draw.borrow());
+                let _ = cr.restore();
             } else {
                 cr.set_source_rgb(0.4, 0.4, 0.4);
                 cr.select_font_face(
@@ -678,9 +716,6 @@ pub fn build_radar_pane(
                 cr.move_to(x, y);
                 let _ = cr.show_text(ts);
             }
-            draw_hovered_warning(cr, &st);
-            draw_location_markers(cr, w, h, &st.viewport, &cfg_draw.borrow());
-            draw_custom_tracks(cr, w, h, &st.viewport, &cfg_draw.borrow());
         });
     }
 
@@ -813,15 +848,16 @@ pub fn build_radar_pane(
         let right_da = right_da.clone();
         let cfg = Rc::clone(&shared_cfg);
         let debounce = Rc::clone(&zoom_debounce);
-        let frame_idle = Rc::clone(&frame_idle);
         move |mutator: &dyn Fn(&mut Viewport)| {
             let mut has_anim = false;
             {
                 let mut l = left_state.borrow_mut();
                 mutator(&mut l.viewport);
-                let l_has_anim = !l.anim_pixbufs.is_empty();
+                let l_has_anim = !l.anim_surfaces.is_empty();
                 has_anim |= l_has_anim;
                 if l_has_anim {
+                    l.render_generation = l.render_generation.wrapping_add(1);
+                    l.anim_viewport_resync = true;
                     // Phase 1: show map immediately so the zoom feels instant.
                     // The radar re-render is scheduled below via idle.
                     l.render_map_to_pixbuf();
@@ -831,9 +867,11 @@ pub fn build_radar_pane(
                 let mut r = right_state.borrow_mut();
                 r.viewport.center = l.viewport.center;
                 r.viewport.zoom = l.viewport.zoom;
-                let r_has_anim = !r.anim_pixbufs.is_empty();
+                let r_has_anim = !r.anim_surfaces.is_empty();
                 has_anim |= r_has_anim;
                 if r_has_anim {
+                    r.render_generation = r.render_generation.wrapping_add(1);
+                    r.anim_viewport_resync = true;
                     r.render_map_to_pixbuf();
                 } else {
                     r.render_from_cache();
@@ -846,35 +884,22 @@ pub fn build_radar_pane(
             left_da.queue_draw();
             right_da.queue_draw();
             if has_anim {
-                // Cancel any in-flight single-frame radar re-render.
-                if let Some(id) = frame_idle.borrow_mut().take() {
-                    id.remove();
+                {
+                    let mut l = left_state.borrow_mut();
+                    if !l.anim_surfaces.is_empty() {
+                        l.mark_anim_frames_stale();
+                    }
                 }
-                // Phase 2: after the map draw completes, re-render the current
-                // animation frame to restore radar data at the new viewport.
-                let l = Rc::clone(&left_state);
-                let r = Rc::clone(&right_state);
-                let l_da = left_da.clone();
-                let r_da = right_da.clone();
-                let fi = Rc::clone(&frame_idle);
-                let id = glib::idle_add_local_once(move || {
-                    fi.borrow_mut().take();
-                    {
-                        let mut lst = l.borrow_mut();
-                        if !lst.anim_pixbufs.is_empty() {
-                            lst.re_render_current_anim_frame();
-                        }
+                {
+                    let mut r = right_state.borrow_mut();
+                    if !r.anim_surfaces.is_empty() {
+                        r.mark_anim_frames_stale();
                     }
-                    {
-                        let mut rst = r.borrow_mut();
-                        if !rst.anim_pixbufs.is_empty() {
-                            rst.re_render_current_anim_frame();
-                        }
-                    }
-                    l_da.queue_draw();
-                    r_da.queue_draw();
-                });
-                *frame_idle.borrow_mut() = Some(id);
+                }
+                let l_idx = left_state.borrow().anim_index;
+                let r_idx = right_state.borrow().anim_index;
+                request_anim_frame_rerender_async(Rc::clone(&left_state), left_da.clone(), l_idx);
+                request_anim_frame_rerender_async(Rc::clone(&right_state), right_da.clone(), r_idx);
 
                 // Cancel and restart the all-frames debounce.
                 if let Some(id) = debounce.borrow_mut().take() {
@@ -946,43 +971,111 @@ pub fn build_radar_pane(
 
             let scroll =
                 gtk4::EventControllerScroll::new(gtk4::EventControllerScrollFlags::VERTICAL);
+            let scroll_zoom_factor = Rc::new(Cell::new(1.0f64));
+            let scroll_zoom_center = Rc::new(Cell::new((0.0f64, 0.0f64)));
+            let scroll_commit = Rc::new(RefCell::new(None::<glib::SourceId>));
             {
                 let mp = Rc::clone(&mouse_pos);
                 let sync_fn = sync_zoom_pan.clone();
                 let set_active = Rc::clone(&set_active_ui);
+                let l_state = Rc::clone(&left_state);
+                let r_state = Rc::clone(&right_state);
+                let l_da = left_da.clone();
+                let r_da = right_da.clone();
+                let zoom_factor = Rc::clone(&scroll_zoom_factor);
+                let zoom_center = Rc::clone(&scroll_zoom_center);
+                let zoom_commit = Rc::clone(&scroll_commit);
                 scroll.connect_scroll(move |_, _dx, dy| {
                     set_active(slot);
-                    let factor = if dy < 0.0 { 1.15 } else { 1.0 / 1.15 };
                     let (mx, my) = mp.get();
-                    sync_fn(&|vp| {
-                        vp.zoom_around_screen_point(mx, my, factor);
-                    });
+                    let factor_step = if dy < 0.0 { 1.15 } else { 1.0 / 1.15 };
+                    zoom_factor.set(zoom_factor.get() * factor_step);
+                    zoom_center.set((mx, my));
+                    {
+                        let factor = zoom_factor.get();
+                        let center = zoom_center.get();
+                        let mut l = l_state.borrow_mut();
+                        l.active_zoom = factor;
+                        l.zoom_center = center;
+                        let mut r = r_state.borrow_mut();
+                        r.active_zoom = factor;
+                        r.zoom_center = center;
+                    }
+                    l_da.queue_draw();
+                    r_da.queue_draw();
+
+                    if let Some(id) = zoom_commit.borrow_mut().take() {
+                        id.remove();
+                    }
+                    let sync_fn = sync_fn.clone();
+                    let l_state = Rc::clone(&l_state);
+                    let r_state = Rc::clone(&r_state);
+                    let zoom_factor = Rc::clone(&zoom_factor);
+                    let zoom_center = Rc::clone(&zoom_center);
+                    let zoom_commit_inner = Rc::clone(&zoom_commit);
+                    *zoom_commit.borrow_mut() = Some(glib::timeout_add_local(
+                        std::time::Duration::from_millis(120),
+                        move || {
+                            zoom_commit_inner.borrow_mut().take();
+                            let factor = zoom_factor.get();
+                            let (mx, my) = zoom_center.get();
+                            zoom_factor.set(1.0);
+                            {
+                                let mut l = l_state.borrow_mut();
+                                l.active_zoom = 1.0;
+                                l.zoom_center = (0.0, 0.0);
+                                let mut r = r_state.borrow_mut();
+                                r.active_zoom = 1.0;
+                                r.zoom_center = (0.0, 0.0);
+                            }
+                            sync_fn(&|vp| {
+                                vp.zoom_around_screen_point(mx, my, factor);
+                            });
+                            glib::ControlFlow::Break
+                        },
+                    ));
                     glib::Propagation::Stop
                 });
             }
             da.add_controller(scroll);
 
             let drag = gtk4::GestureDrag::new();
-            let last_offset = Rc::new(RefCell::new((0.0f64, 0.0f64)));
             {
-                let sync_fn = sync_zoom_pan.clone();
-                let last_off = Rc::clone(&last_offset);
                 let set_active = Rc::clone(&set_active_ui);
+                let l_state = Rc::clone(&left_state);
+                let r_state = Rc::clone(&right_state);
+                let l_da = left_da.clone();
+                let r_da = right_da.clone();
                 drag.connect_drag_update(move |_gesture, dx, dy| {
                     set_active(slot);
-                    let (prev_dx, prev_dy) = *last_off.borrow();
-                    let delta_x = dx - prev_dx;
-                    let delta_y = dy - prev_dy;
-                    *last_off.borrow_mut() = (dx, dy);
-                    sync_fn(&|vp| {
-                        vp.pan_pixels(delta_x, delta_y);
-                    });
+                    {
+                        let mut l = l_state.borrow_mut();
+                        l.drag_offset_x = dx;
+                        l.drag_offset_y = dy;
+                        let mut r = r_state.borrow_mut();
+                        r.drag_offset_x = dx;
+                        r.drag_offset_y = dy;
+                    }
+                    l_da.queue_draw();
+                    r_da.queue_draw();
                 });
             }
             {
-                let last_off = Rc::clone(&last_offset);
-                drag.connect_drag_end(move |_, _, _| {
-                    *last_off.borrow_mut() = (0.0, 0.0);
+                let sync_fn = sync_zoom_pan.clone();
+                let l_state = Rc::clone(&left_state);
+                let r_state = Rc::clone(&right_state);
+                drag.connect_drag_end(move |_, dx, dy| {
+                    {
+                        let mut l = l_state.borrow_mut();
+                        l.drag_offset_x = 0.0;
+                        l.drag_offset_y = 0.0;
+                        let mut r = r_state.borrow_mut();
+                        r.drag_offset_x = 0.0;
+                        r.drag_offset_y = 0.0;
+                    }
+                    sync_fn(&|vp| {
+                        vp.pan_pixels(dx, dy);
+                    });
                 });
             }
             da.add_controller(drag);
@@ -1001,24 +1094,35 @@ pub fn build_radar_pane(
                         let st = pane_state.borrow();
                         st.viewport.screen_to_latlon(x, y)
                     };
-                    {
+                    let changed = {
                         let mut st = pane_state.borrow_mut();
+                        let prev = st.hovered_warning;
                         st.hovered_warning = st
                             .warnings
                             .iter()
                             .enumerate()
                             .find(|(_, w)| w.is_current && warning_bbox_contains(w, &clicked))
                             .map(|(idx, _)| idx);
+                        st.hovered_warning != prev
+                    };
+                    if changed {
+                        da_motion.queue_draw();
                     }
-                    da_motion.queue_draw();
                 });
             }
             {
                 let pane_state = Rc::clone(&pane_state);
                 let da_motion = da.clone();
                 motion.connect_leave(move |_| {
-                    pane_state.borrow_mut().hovered_warning = None;
-                    da_motion.queue_draw();
+                    let should_draw = {
+                        let mut st = pane_state.borrow_mut();
+                        let had = st.hovered_warning.is_some();
+                        st.hovered_warning = None;
+                        had
+                    };
+                    if should_draw {
+                        da_motion.queue_draw();
+                    }
                 });
             }
             da.add_controller(motion);
@@ -1284,9 +1388,11 @@ pub fn build_radar_pane(
                 let has_anim =
                     !left_st.anim_l2_frames.is_empty() || !left_st.anim_l3_frames.is_empty();
                 if has_anim {
-                    left_st.anim_pixbufs.clear();
+                    left_st.anim_surfaces.clear();
+                    left_st.anim_frame_stale.clear();
+                    left_st.anim_frame_inflight.clear();
                     left_st.anim_index = 0;
-                    left_st.current_pixbuf = None;
+                    left_st.current_surface = None;
                 }
             }
             {
@@ -1294,9 +1400,11 @@ pub fn build_radar_pane(
                 let has_anim =
                     !right_st.anim_l2_frames.is_empty() || !right_st.anim_l3_frames.is_empty();
                 if has_anim {
-                    right_st.anim_pixbufs.clear();
+                    right_st.anim_surfaces.clear();
+                    right_st.anim_frame_stale.clear();
+                    right_st.anim_frame_inflight.clear();
                     right_st.anim_index = 0;
-                    right_st.current_pixbuf = None;
+                    right_st.current_surface = None;
                 }
             }
 
@@ -1738,7 +1846,7 @@ pub fn build_radar_pane(
                             let mut st = state_ref.borrow_mut();
                             st.cached_l2 = Some((l2.clone(), velocity));
                             st.timestamp_str = Some(l2.timestamp_str());
-                            st.current_pixbuf = Some(rgba_to_pixbuf(&img));
+                            st.current_surface = Some(img);
                             drop(st);
                             da_ref.queue_draw();
                         }
@@ -1843,7 +1951,7 @@ pub fn build_radar_pane(
             };
             let all_ready = active_states
                 .iter()
-                .all(|(s, _)| !s.borrow().anim_pixbufs.is_empty());
+                .all(|(s, _)| !s.borrow().anim_surfaces.is_empty());
             if all_ready {
                 ar_c.set(true);
                 anim_btn_c.set_label("⏸ Pause");
@@ -1923,12 +2031,14 @@ pub fn build_radar_pane(
                             let n = min_frames_c.get();
                             for (st, draw) in &states_done {
                                 let mut st = st.borrow_mut();
-                                st.anim_pixbufs.truncate(n);
+                                st.anim_surfaces.truncate(n);
+                                st.anim_frame_stale.truncate(n);
+                                st.anim_frame_inflight.truncate(n);
                                 st.anim_timestamps.truncate(n);
                                 st.anim_l2_frames.truncate(n);
                                 st.anim_l3_frames.truncate(n);
                                 st.anim_index = 0;
-                                st.current_pixbuf = st.anim_pixbufs.first().cloned();
+                                st.current_surface = st.anim_surfaces.first().cloned();
                                 st.timestamp_str = st.anim_timestamps.first().cloned();
                                 draw.queue_draw();
                             }
@@ -1981,18 +2091,18 @@ pub fn build_radar_pane(
             shared_index_tl.set(idx);
             {
                 let mut st = left_state_tl.borrow_mut();
-                if idx < st.anim_pixbufs.len() {
+                if idx < st.anim_surfaces.len() {
                     st.anim_index = idx;
-                    st.current_pixbuf = Some(st.anim_pixbufs[idx].clone());
+                    st.current_surface = Some(st.anim_surfaces[idx].clone());
                     st.timestamp_str = st.anim_timestamps.get(idx).cloned();
                 }
             }
             left_da_tl.queue_draw();
             if pane_count_tl.get() == 2 {
                 let mut st = right_state_tl.borrow_mut();
-                if idx < st.anim_pixbufs.len() {
+                if idx < st.anim_surfaces.len() {
                     st.anim_index = idx;
-                    st.current_pixbuf = Some(st.anim_pixbufs[idx].clone());
+                    st.current_surface = Some(st.anim_surfaces[idx].clone());
                     st.timestamp_str = st.anim_timestamps.get(idx).cloned();
                 }
                 drop(st);
@@ -2121,7 +2231,7 @@ fn start_shared_timer(
         }
         let frame_count = states
             .iter()
-            .map(|(s, _)| s.borrow().anim_pixbufs.len())
+            .map(|(s, _)| s.borrow().anim_surfaces.len())
             .filter(|n| *n > 0)
             .min()
             .unwrap_or(0);
@@ -2133,8 +2243,8 @@ fn start_shared_timer(
         for (state, da) in &states {
             let mut st = state.borrow_mut();
             st.anim_index = idx;
-            if idx < st.anim_pixbufs.len() {
-                st.current_pixbuf = Some(st.anim_pixbufs[idx].clone());
+            if idx < st.anim_surfaces.len() {
+                st.current_surface = Some(st.anim_surfaces[idx].clone());
                 st.timestamp_str = st.anim_timestamps.get(idx).cloned();
             }
             drop(st);
@@ -2202,7 +2312,7 @@ fn load_animation_frames<F>(
                         "Constructing animation from {} frames...",
                         decomp_frames.len()
                     ));
-                    let mut pixbufs = Vec::new();
+                    let mut surfaces = Vec::new();
                     let mut timestamps = Vec::new();
                     let mut decoded = Vec::new();
                     for decompressed in decomp_frames {
@@ -2220,27 +2330,29 @@ fn load_animation_frames<F>(
                                 Some(st.map_data.as_ref()),
                             ) {
                                 timestamps.push(l2.timestamp_str());
-                                pixbufs.push(rgba_to_pixbuf(&img));
+                                surfaces.push(img);
                                 decoded.push((l2, vel));
                             }
                         }
                     }
-                    if pixbufs.is_empty() {
+                    if surfaces.is_empty() {
                         on_done(Err("no animation frames decoded".to_string()));
                         return;
                     }
                     {
                         let mut st = state.borrow_mut();
-                        st.anim_pixbufs = pixbufs;
+                        st.anim_surfaces = surfaces;
                         st.anim_timestamps = timestamps;
                         st.anim_l2_frames = decoded;
                         st.anim_l3_frames.clear();
                         st.anim_index = 0;
-                        st.current_pixbuf = st.anim_pixbufs.first().cloned();
+                        st.anim_frame_stale = vec![false; st.anim_surfaces.len()];
+                        st.anim_frame_inflight = vec![false; st.anim_surfaces.len()];
+                        st.current_surface = st.anim_surfaces.first().cloned();
                         st.timestamp_str = st.anim_timestamps.first().cloned();
                     }
                     drawing_area.queue_draw();
-                    let n = state.borrow().anim_pixbufs.len();
+                    let n = state.borrow().anim_surfaces.len();
                     on_done(Ok(n));
                 }
                 Err(e) => {
@@ -2281,7 +2393,7 @@ fn load_animation_frames<F>(
                         "Constructing animation from {} frames...",
                         raw_frames.len()
                     ));
-                    let mut pixbufs = Vec::new();
+                    let mut surfaces = Vec::new();
                     let mut timestamps = Vec::new();
                     let mut decoded = Vec::new();
                     for raw in raw_frames {
@@ -2298,27 +2410,29 @@ fn load_animation_frames<F>(
                                 Some(st.map_data.as_ref()),
                             ) {
                                 timestamps.push(l3.timestamp_str());
-                                pixbufs.push(rgba_to_pixbuf(&img));
+                                surfaces.push(img);
                                 decoded.push(l3);
                             }
                         }
                     }
-                    if pixbufs.is_empty() {
+                    if surfaces.is_empty() {
                         on_done(Err("no animation frames decoded".to_string()));
                         return;
                     }
                     {
                         let mut st = state.borrow_mut();
-                        st.anim_pixbufs = pixbufs;
+                        st.anim_surfaces = surfaces;
                         st.anim_timestamps = timestamps;
                         st.anim_l3_frames = decoded;
                         st.anim_l2_frames.clear();
                         st.anim_index = 0;
-                        st.current_pixbuf = st.anim_pixbufs.first().cloned();
+                        st.anim_frame_stale = vec![false; st.anim_surfaces.len()];
+                        st.anim_frame_inflight = vec![false; st.anim_surfaces.len()];
+                        st.current_surface = st.anim_surfaces.first().cloned();
                         st.timestamp_str = st.anim_timestamps.first().cloned();
                     }
                     drawing_area.queue_draw();
-                    let n = state.borrow().anim_pixbufs.len();
+                    let n = state.borrow().anim_surfaces.len();
                     on_done(Ok(n));
                 }
                 Err(e) => {
@@ -2388,7 +2502,7 @@ fn start_animation(
                     Ok((decomp_frames, vel)) => {
                         let total = decomp_frames.len();
                         status.set_text(&format!("Rendering 0/{total}..."));
-                        render_l2_frames_idle(
+                        render_l2_frames_async(
                             decomp_frames,
                             vel,
                             total,
@@ -2438,7 +2552,7 @@ fn start_animation(
                     Ok(raw_frames) => {
                         let total = raw_frames.len();
                         status.set_text(&format!("Rendering 0/{total}..."));
-                        render_l3_frames_idle(
+                        render_l3_frames_async(
                             raw_frames,
                             total,
                             state,
@@ -2496,11 +2610,9 @@ fn time_span_str(timestamps: &[String]) -> String {
     }
 }
 
-/// Process L2 animation frames one at a time on the GTK main loop via idle callbacks.
-/// Frames are already decompressed (BZ2 expansion done in async task).
-/// Writes each frame into state immediately so animation starts on the first decoded frame.
+/// Process L2 animation frames off the GTK main thread, then commit results on GTK.
 #[allow(clippy::too_many_arguments)]
-fn render_l2_frames_idle(
+fn render_l2_frames_async(
     decomp_frames: Vec<Vec<u8>>,
     vel: bool,
     total: usize,
@@ -2513,103 +2625,126 @@ fn render_l2_frames_idle(
     timeline: Scale,
     slider_updating: Rc<Cell<bool>>,
 ) {
-    // Clear any stale animation state so frames append cleanly.
-    {
-        let mut st = state.borrow_mut();
-        st.anim_pixbufs.clear();
-        st.anim_timestamps.clear();
-        st.anim_l2_frames.clear();
-        st.anim_l3_frames.clear();
-        st.anim_index = 0;
+    if let Some(first) = decomp_frames.first() {
+        let preview = {
+            let st = state.borrow();
+            let tilt_idx = st.l2_tilt_idx;
+            level2::decode(first, vel, tilt_idx).ok().and_then(|l2| {
+                let code: u16 = if vel { 99 } else { 94 };
+                let palette = st.palette_registry.for_product(code);
+                cairo_render::render_level2(
+                    &l2,
+                    palette,
+                    &st.viewport,
+                    &st.overlays,
+                    vel,
+                    Some(st.map_data.as_ref()),
+                )
+                .ok()
+                .map(|surf| (l2.timestamp_str(), surf))
+            })
+        };
+        if let Some((ts, surf)) = preview {
+            let mut st = state.borrow_mut();
+            st.current_surface = Some(surf);
+            st.timestamp_str = Some(ts);
+            drop(st);
+            drawing_area.queue_draw();
+            status.set_text(&format!("Rendering 1/{total}..."));
+        }
     }
-    let frame_iter: Rc<RefCell<std::vec::IntoIter<Vec<u8>>>> =
-        Rc::new(RefCell::new(decomp_frames.into_iter()));
-    let idx = Rc::new(Cell::new(0usize));
-    let timer_started = Rc::new(Cell::new(false));
 
-    glib::idle_add_local(move || {
-        let decompressed = { frame_iter.borrow_mut().next() };
-        if let Some(decompressed) = decompressed {
-            let i = idx.get();
-            idx.set(i + 1);
-            status.set_text(&format!("Rendering frame {}/{total}...", i + 1));
-            let tilt_idx = state.borrow().l2_tilt_idx;
-            // Render while holding an immutable borrow, then drop before mutating state.
-            let rendered: Option<(String, Pixbuf, Level2Data)> = {
-                let st = state.borrow();
-                level2::decode(&decompressed, vel, tilt_idx)
-                    .ok()
-                    .and_then(|l2| {
-                        let code: u16 = if vel { 99 } else { 94 };
-                        let palette = st.palette_registry.for_product(code);
-                        cairo_render::render_level2(
-                            &l2,
-                            palette,
-                            &st.viewport,
-                            &st.overlays,
-                            vel,
-                            Some(st.map_data.as_ref()),
-                        )
-                        .ok()
-                        .map(|img| (l2.timestamp_str(), rgba_to_pixbuf(&img), l2))
-                    })
-            };
-            if let Some((ts, pixbuf, l2)) = rendered {
-                let is_first = {
-                    let mut st = state.borrow_mut();
-                    st.anim_timestamps.push(ts);
-                    st.anim_pixbufs.push(pixbuf);
-                    st.anim_l2_frames.push((l2, vel));
-                    let first = st.anim_pixbufs.len() == 1;
-                    if first {
-                        st.current_pixbuf = st.anim_pixbufs.first().cloned();
-                        st.timestamp_str = st.anim_timestamps.first().cloned();
-                    }
-                    first
-                };
-                drawing_area.queue_draw();
-                if is_first && !timer_started.get() {
-                    timer_started.set(true);
-                    start_timer(
-                        Rc::clone(&state),
-                        drawing_area.clone(),
-                        Rc::clone(&running),
-                        Rc::clone(&timer),
-                        timeline.clone(),
-                        Rc::clone(&slider_updating),
-                    );
+    let tilt_idx = state.borrow().l2_tilt_idx;
+
+    let render_progress: runtime::ProgressSlot = Arc::new(Mutex::new(None));
+    let stop_render_progress =
+        runtime::progress_poller(Arc::clone(&render_progress), status.clone());
+    runtime::spawn(
+        async move {
+            // Decode only (fast binary parse); rendering happens concurrently per-frame below.
+            let n = decomp_frames.len();
+            let mut decoded: Vec<Level2Data> = Vec::with_capacity(n);
+            for (i, decompressed) in decomp_frames.iter().enumerate() {
+                if let Ok(mut g) = render_progress.lock() {
+                    *g = Some(format!("Decoding frame {}/{n}...", i + 1));
+                }
+                if let Ok(l2) = level2::decode(decompressed, vel, tilt_idx) {
+                    decoded.push(l2);
                 }
             }
-            glib::ControlFlow::Continue
-        } else {
-            // All frames rendered; finalize the UI.
-            let n = state.borrow().anim_pixbufs.len();
+            decoded
+        },
+        move |decoded_frames| {
+            stop_render_progress.set(true);
+            let n = decoded_frames.len();
             anim_btn.set_sensitive(true);
             if n == 0 {
                 status.set_text("Animation: no frames decoded");
                 running.set(false);
-            } else {
-                let ts = state.borrow().anim_timestamps.clone();
-                let span = time_span_str(&ts);
-                let cur_idx = state.borrow().anim_index;
-                // Update timeline range now that the final frame count is known.
-                slider_updating.set(true);
-                timeline.set_range(0.0, (n - 1) as f64);
-                timeline.set_value(cur_idx as f64);
-                timeline.set_sensitive(true);
-                slider_updating.set(false);
-                status.set_text(&format!("Animating {n} frames{span}"));
-                anim_btn.set_label("⏸ Pause");
+                return;
             }
-            glib::ControlFlow::Break
-        }
-    });
+
+            // Initialise all slots with the frame-0 preview so the timer can start immediately.
+            {
+                let mut st = state.borrow_mut();
+                let placeholder = st.current_surface.clone().unwrap_or_else(|| {
+                    cairo_render::render_map_only(
+                        &st.viewport,
+                        &st.overlays,
+                        Some(st.map_data.as_ref()),
+                    )
+                    .expect("render_map_only failed creating placeholder")
+                });
+                let mut timestamps = Vec::with_capacity(n);
+                let mut l2_frames = Vec::with_capacity(n);
+                for l2 in &decoded_frames {
+                    timestamps.push(l2.timestamp_str());
+                    l2_frames.push((l2.clone(), vel));
+                }
+                st.anim_surfaces = vec![placeholder; n];
+                st.anim_timestamps = timestamps;
+                st.anim_l2_frames = l2_frames;
+                st.anim_l3_frames.clear();
+                // Frame 0 already has the preview; mark the rest stale so they render on-demand.
+                st.anim_frame_stale = vec![true; n];
+                st.anim_frame_stale[0] = false;
+                st.anim_frame_inflight = vec![false; n];
+                st.anim_index = 0;
+                st.current_surface = st.anim_surfaces.first().cloned();
+                st.timestamp_str = st.anim_timestamps.first().cloned();
+            }
+
+            drawing_area.queue_draw();
+            start_timer(
+                Rc::clone(&state),
+                drawing_area.clone(),
+                Rc::clone(&running),
+                Rc::clone(&timer),
+                timeline.clone(),
+                Rc::clone(&slider_updating),
+            );
+
+            let ts = state.borrow().anim_timestamps.clone();
+            let span = time_span_str(&ts);
+            slider_updating.set(true);
+            timeline.set_range(0.0, (n - 1) as f64);
+            timeline.set_value(0.0);
+            timeline.set_sensitive(true);
+            slider_updating.set(false);
+            status.set_text(&format!("Animating {n} frames{span}"));
+            anim_btn.set_label("⏸ Pause");
+
+            // Kick off concurrent renders for frames 1..n (frame 0 already has preview).
+            for i in 1..n {
+                request_anim_frame_rerender_async(Rc::clone(&state), drawing_area.clone(), i);
+            }
+        },
+    );
 }
 
-/// Process L3 animation frames one at a time on the GTK main loop via idle callbacks.
-/// Writes each frame into state immediately so animation starts on the first decoded frame.
+/// Process L3 animation frames off the GTK main thread, then commit results on GTK.
 #[allow(clippy::too_many_arguments)]
-fn render_l3_frames_idle(
+fn render_l3_frames_async(
     raw_frames: Vec<Vec<u8>>,
     total: usize,
     state: Rc<RefCell<RadarPaneState>>,
@@ -2621,94 +2756,118 @@ fn render_l3_frames_idle(
     timeline: Scale,
     slider_updating: Rc<Cell<bool>>,
 ) {
-    // Clear any stale animation state so frames append cleanly.
-    {
-        let mut st = state.borrow_mut();
-        st.anim_pixbufs.clear();
-        st.anim_timestamps.clear();
-        st.anim_l3_frames.clear();
-        st.anim_l2_frames.clear();
-        st.anim_index = 0;
+    if let Some(first) = raw_frames.first() {
+        let preview = {
+            let st = state.borrow();
+            let is_vel = st.product.is_velocity();
+            level3::decode(first).ok().and_then(|l3| {
+                let palette = st.palette_registry.for_product(l3.product_code);
+                cairo_render::render_level3(
+                    &l3,
+                    palette,
+                    &st.viewport,
+                    &st.overlays,
+                    is_vel,
+                    Some(st.map_data.as_ref()),
+                )
+                .ok()
+                .map(|surf| (l3.timestamp_str(), surf))
+            })
+        };
+        if let Some((ts, surf)) = preview {
+            let mut st = state.borrow_mut();
+            st.current_surface = Some(surf);
+            st.timestamp_str = Some(ts);
+            drop(st);
+            drawing_area.queue_draw();
+            status.set_text(&format!("Rendering 1/{total}..."));
+        }
     }
-    let raw_iter: Rc<RefCell<std::vec::IntoIter<Vec<u8>>>> =
-        Rc::new(RefCell::new(raw_frames.into_iter()));
-    let idx = Rc::new(Cell::new(0usize));
-    let timer_started = Rc::new(Cell::new(false));
 
-    glib::idle_add_local(move || {
-        let raw = { raw_iter.borrow_mut().next() };
-        if let Some(raw) = raw {
-            let i = idx.get();
-            idx.set(i + 1);
-            status.set_text(&format!("Rendering frame {}/{total}...", i + 1));
-            // Render while holding an immutable borrow, then drop before mutating state.
-            let rendered: Option<(String, Pixbuf, Level3Data)> = {
-                let st = state.borrow();
-                let is_vel = st.product.is_velocity();
-                level3::decode(&raw).ok().and_then(|l3| {
-                    let palette = st.palette_registry.for_product(l3.product_code);
-                    cairo_render::render_level3(
-                        &l3,
-                        palette,
-                        &st.viewport,
-                        &st.overlays,
-                        is_vel,
-                        Some(st.map_data.as_ref()),
-                    )
-                    .ok()
-                    .map(|img| (l3.timestamp_str(), rgba_to_pixbuf(&img), l3))
-                })
-            };
-            if let Some((ts, pixbuf, l3)) = rendered {
-                let is_first = {
-                    let mut st = state.borrow_mut();
-                    st.anim_timestamps.push(ts);
-                    st.anim_pixbufs.push(pixbuf);
-                    st.anim_l3_frames.push(l3);
-                    let first = st.anim_pixbufs.len() == 1;
-                    if first {
-                        st.current_pixbuf = st.anim_pixbufs.first().cloned();
-                        st.timestamp_str = st.anim_timestamps.first().cloned();
-                    }
-                    first
-                };
-                drawing_area.queue_draw();
-                if is_first && !timer_started.get() {
-                    timer_started.set(true);
-                    start_timer(
-                        Rc::clone(&state),
-                        drawing_area.clone(),
-                        Rc::clone(&running),
-                        Rc::clone(&timer),
-                        timeline.clone(),
-                        Rc::clone(&slider_updating),
-                    );
+    let render_progress: runtime::ProgressSlot = Arc::new(Mutex::new(None));
+    let stop_render_progress =
+        runtime::progress_poller(Arc::clone(&render_progress), status.clone());
+    runtime::spawn(
+        async move {
+            // Decode only (fast); rendering happens concurrently per-frame below.
+            let n = raw_frames.len();
+            let mut decoded: Vec<Level3Data> = Vec::with_capacity(n);
+            for (i, raw) in raw_frames.iter().enumerate() {
+                if let Ok(mut g) = render_progress.lock() {
+                    *g = Some(format!("Decoding frame {}/{n}...", i + 1));
+                }
+                if let Ok(l3) = level3::decode(raw) {
+                    decoded.push(l3);
                 }
             }
-            glib::ControlFlow::Continue
-        } else {
-            // All frames rendered; finalize the UI.
-            let n = state.borrow().anim_pixbufs.len();
+            decoded
+        },
+        move |decoded_frames| {
+            stop_render_progress.set(true);
+            let n = decoded_frames.len();
             anim_btn.set_sensitive(true);
             if n == 0 {
                 status.set_text("Animation: no frames decoded");
                 running.set(false);
-            } else {
-                let ts = state.borrow().anim_timestamps.clone();
-                let span = time_span_str(&ts);
-                let cur_idx = state.borrow().anim_index;
-                // Update timeline range now that the final frame count is known.
-                slider_updating.set(true);
-                timeline.set_range(0.0, (n - 1) as f64);
-                timeline.set_value(cur_idx as f64);
-                timeline.set_sensitive(true);
-                slider_updating.set(false);
-                status.set_text(&format!("Animating {n} frames{span}"));
-                anim_btn.set_label("⏸ Pause");
+                return;
             }
-            glib::ControlFlow::Break
-        }
-    });
+
+            // Initialise all slots with the frame-0 preview so the timer can start immediately.
+            {
+                let mut st = state.borrow_mut();
+                let placeholder = st.current_surface.clone().unwrap_or_else(|| {
+                    cairo_render::render_map_only(
+                        &st.viewport,
+                        &st.overlays,
+                        Some(st.map_data.as_ref()),
+                    )
+                    .expect("render_map_only failed creating placeholder")
+                });
+                let mut timestamps = Vec::with_capacity(n);
+                let mut l3_frames = Vec::with_capacity(n);
+                for l3 in &decoded_frames {
+                    timestamps.push(l3.timestamp_str());
+                    l3_frames.push(l3.clone());
+                }
+                st.anim_surfaces = vec![placeholder; n];
+                st.anim_timestamps = timestamps;
+                st.anim_l3_frames = l3_frames;
+                st.anim_l2_frames.clear();
+                // Frame 0 already has the preview; mark the rest stale so they render on-demand.
+                st.anim_frame_stale = vec![true; n];
+                st.anim_frame_stale[0] = false;
+                st.anim_frame_inflight = vec![false; n];
+                st.anim_index = 0;
+                st.current_surface = st.anim_surfaces.first().cloned();
+                st.timestamp_str = st.anim_timestamps.first().cloned();
+            }
+
+            drawing_area.queue_draw();
+            start_timer(
+                Rc::clone(&state),
+                drawing_area.clone(),
+                Rc::clone(&running),
+                Rc::clone(&timer),
+                timeline.clone(),
+                Rc::clone(&slider_updating),
+            );
+
+            let ts = state.borrow().anim_timestamps.clone();
+            let span = time_span_str(&ts);
+            slider_updating.set(true);
+            timeline.set_range(0.0, (n - 1) as f64);
+            timeline.set_value(0.0);
+            timeline.set_sensitive(true);
+            slider_updating.set(false);
+            status.set_text(&format!("Animating {n} frames{span}"));
+            anim_btn.set_label("⏸ Pause");
+
+            // Kick off concurrent renders for frames 1..n (frame 0 already has preview).
+            for i in 1..n {
+                request_anim_frame_rerender_async(Rc::clone(&state), drawing_area.clone(), i);
+            }
+        },
+    );
 }
 
 fn start_timer(
@@ -2724,17 +2883,34 @@ fn start_timer(
             return glib::ControlFlow::Break;
         }
         let mut st = state.borrow_mut();
-        if st.anim_pixbufs.is_empty() {
+        if st.anim_surfaces.is_empty() {
             return glib::ControlFlow::Break;
         }
-        st.anim_index = (st.anim_index + 1) % st.anim_pixbufs.len();
-        st.current_pixbuf = Some(st.anim_pixbufs[st.anim_index].clone());
-        st.timestamp_str = st.anim_timestamps.get(st.anim_index).cloned();
-        let idx = st.anim_index;
+        if st.anim_viewport_resync {
+            return glib::ControlFlow::Continue;
+        }
+        // Only advance to frames that are fully rendered; skip stale placeholders so the
+        // loop stays within the already-rendered subset while the rest fill in concurrently.
+        let len = st.anim_surfaces.len();
+        let mut next_idx = None;
+        for offset in 1..len {
+            let i = (st.anim_index + offset) % len;
+            if !st.anim_frame_stale.get(i).copied().unwrap_or(true) {
+                next_idx = Some(i);
+                break;
+            }
+        }
+        let Some(next_idx) = next_idx else {
+            // Still on the only rendered frame; wait for more renders to complete.
+            return glib::ControlFlow::Continue;
+        };
+        st.anim_index = next_idx;
+        st.current_surface = Some(st.anim_surfaces[next_idx].clone());
+        st.timestamp_str = st.anim_timestamps.get(next_idx).cloned();
         drop(st);
         // Update timeline position without triggering the value_changed scrub handler
         slider_updating.set(true);
-        timeline.set_value(idx as f64);
+        timeline.set_value(next_idx as f64);
         slider_updating.set(false);
         drawing_area.queue_draw();
         glib::ControlFlow::Continue
@@ -2742,62 +2918,168 @@ fn start_timer(
     *timer.borrow_mut() = Some(id);
 }
 
+enum FrameRenderJob {
+    L2 {
+        frame: Level2Data,
+        vel: bool,
+        viewport: Viewport,
+        overlays: OverlaySet,
+        map: Arc<MapData>,
+        palette_ref: String,
+        palette_vel: String,
+    },
+    L3 {
+        frame: Level3Data,
+        is_vel: bool,
+        viewport: Viewport,
+        overlays: OverlaySet,
+        map: Arc<MapData>,
+        palette_ref: String,
+        palette_vel: String,
+    },
+}
+
+fn request_anim_frame_rerender_async(
+    state: Rc<RefCell<RadarPaneState>>,
+    drawing_area: DrawingArea,
+    idx: usize,
+) {
+    let (job, generation) = {
+        let mut st = state.borrow_mut();
+        if idx >= st.anim_surfaces.len() || idx >= st.anim_frame_stale.len() {
+            return;
+        }
+        if !st.anim_frame_stale[idx] || st.anim_frame_inflight.get(idx).copied().unwrap_or(false) {
+            return;
+        }
+        st.anim_frame_inflight[idx] = true;
+        if let Some((l2, vel)) = st.anim_l2_frames.get(idx) {
+            (
+                Some(FrameRenderJob::L2 {
+                    frame: l2.clone(),
+                    vel: *vel,
+                    viewport: st.viewport.clone(),
+                    overlays: st.overlays.clone(),
+                    map: Arc::clone(&st.map_data),
+                    palette_ref: st.palette_ref.clone(),
+                    palette_vel: st.palette_vel.clone(),
+                }),
+                st.render_generation,
+            )
+        } else if let Some(l3) = st.anim_l3_frames.get(idx) {
+            (
+                Some(FrameRenderJob::L3 {
+                    frame: l3.clone(),
+                    is_vel: st.product.is_velocity(),
+                    viewport: st.viewport.clone(),
+                    overlays: st.overlays.clone(),
+                    map: Arc::clone(&st.map_data),
+                    palette_ref: st.palette_ref.clone(),
+                    palette_vel: st.palette_vel.clone(),
+                }),
+                st.render_generation,
+            )
+        } else {
+            st.anim_frame_inflight[idx] = false;
+            (None, st.render_generation)
+        }
+    };
+    let Some(job) = job else { return };
+    runtime::spawn(
+        async move {
+            match job {
+                FrameRenderJob::L2 {
+                    frame,
+                    vel,
+                    viewport,
+                    overlays,
+                    map,
+                    palette_ref,
+                    palette_vel,
+                } => {
+                    let reg = PaletteRegistry::with_names(&palette_ref, &palette_vel);
+                    let code: u16 = if vel { 99 } else { 94 };
+                    let palette = reg.for_product(code);
+                    cairo_render::render_level2_rgba(
+                        &frame,
+                        palette,
+                        &viewport,
+                        &overlays,
+                        vel,
+                        Some(map.as_ref()),
+                    )
+                }
+                FrameRenderJob::L3 {
+                    frame,
+                    is_vel,
+                    viewport,
+                    overlays,
+                    map,
+                    palette_ref,
+                    palette_vel,
+                } => {
+                    let reg = PaletteRegistry::with_names(&palette_ref, &palette_vel);
+                    let palette = reg.for_product(frame.product_code);
+                    cairo_render::render_level3_rgba(
+                        &frame,
+                        palette,
+                        &viewport,
+                        &overlays,
+                        is_vel,
+                        Some(map.as_ref()),
+                    )
+                }
+            }
+        },
+        move |result| {
+            let mut st = state.borrow_mut();
+            if idx < st.anim_frame_inflight.len() {
+                st.anim_frame_inflight[idx] = false;
+            }
+            if st.render_generation != generation {
+                drop(st);
+                drawing_area.queue_draw();
+                return;
+            }
+            if let Ok(img) = result {
+                if let Some(surf) = rgba_to_surface(&img) {
+                    if idx < st.anim_surfaces.len() {
+                        st.anim_surfaces[idx] = surf.clone();
+                        if idx < st.anim_frame_stale.len() {
+                            st.anim_frame_stale[idx] = false;
+                        }
+                        if idx == st.anim_index {
+                            st.current_surface = Some(surf);
+                            st.anim_viewport_resync = false;
+                        }
+                    }
+                }
+            }
+            drop(st);
+            drawing_area.queue_draw();
+        },
+    );
+}
+
 /// Re-render all animation frames from decoded data at the current viewport.
 /// Used after a zoom/pan debounce, or when the palette changes during animation.
 /// Processes one frame per GTK idle slot to keep the UI responsive.
 fn re_render_all_anim_frames_idle(state: Rc<RefCell<RadarPaneState>>, drawing_area: DrawingArea) {
-    let total = {
-        let st = state.borrow();
-        st.anim_l2_frames.len().max(st.anim_l3_frames.len())
-    };
+    let total = state.borrow().anim_surfaces.len();
     if total == 0 {
         return;
     }
-
-    let idx = Rc::new(Cell::new(0usize));
-    glib::idle_add_local(move || {
-        let i = idx.get();
-        if i >= total {
-            drawing_area.queue_draw();
-            return glib::ControlFlow::Break;
-        }
-        idx.set(i + 1);
+    {
         let mut st = state.borrow_mut();
-        let map = Some(st.map_data.as_ref());
-        if let Some((l2, vel)) = st.anim_l2_frames.get(i) {
-            let code: u16 = if *vel { 99 } else { 94 };
-            let palette = st.palette_registry.for_product(code);
-            if let Ok(img) =
-                cairo_render::render_level2(l2, palette, &st.viewport, &st.overlays, *vel, map)
-            {
-                let pb = rgba_to_pixbuf(&img);
-                if let Some(slot) = st.anim_pixbufs.get_mut(i) {
-                    *slot = pb.clone();
-                }
-                if i == st.anim_index {
-                    st.current_pixbuf = Some(pb);
-                }
-            }
-        } else if let Some(l3) = st.anim_l3_frames.get(i) {
-            let is_vel = st.product.is_velocity();
-            let palette = st.palette_registry.for_product(l3.product_code);
-            if let Ok(img) =
-                cairo_render::render_level3(l3, palette, &st.viewport, &st.overlays, is_vel, map)
-            {
-                let pb = rgba_to_pixbuf(&img);
-                if let Some(slot) = st.anim_pixbufs.get_mut(i) {
-                    *slot = pb.clone();
-                }
-                if i == st.anim_index {
-                    st.current_pixbuf = Some(pb);
-                }
-            }
-        }
-        // Queue draw each frame so animation looks live while re-rendering
-        drop(st);
-        drawing_area.queue_draw();
-        glib::ControlFlow::Continue
-    });
+        st.render_generation = st.render_generation.wrapping_add(1);
+        st.mark_anim_frames_stale();
+        st.anim_viewport_resync = true;
+    }
+    let start = state.borrow().anim_index % total;
+    for offset in 0..total {
+        let i = (start + offset) % total;
+        request_anim_frame_rerender_async(Rc::clone(&state), drawing_area.clone(), i);
+    }
 }
 
 // ── Data loading ──────────────────────────────────────────────────────────────
@@ -2870,7 +3152,7 @@ fn load_level3(
                             Ok(img) => {
                                 let mut st = state.borrow_mut();
                                 st.timestamp_str = Some(l3.timestamp_str());
-                                st.current_pixbuf = Some(rgba_to_pixbuf(&img));
+                                st.current_surface = Some(img);
                                 let desc = st.product.description_line();
                                 let status_text = if desc.is_empty() {
                                     "Ready".to_string()
@@ -2975,7 +3257,7 @@ fn load_level2(
                                     Ok(img) => {
                                         let mut st = state.borrow_mut();
                                         st.timestamp_str = Some(l2.timestamp_str());
-                                        st.current_pixbuf = Some(rgba_to_pixbuf(&img));
+                                        st.current_surface = Some(img);
                                         status.set_text("Ready");
                                         drawing_area.queue_draw();
                                     }
@@ -3082,16 +3364,34 @@ fn refresh_storm_tracks(
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-fn rgba_to_pixbuf(img: &meso_render::frame::RenderedImage) -> Pixbuf {
-    Pixbuf::from_bytes(
-        &glib::Bytes::from(&img.data),
-        gdk_pixbuf::Colorspace::Rgb,
-        true,
-        8,
+fn rgba_to_surface(img: &meso_render::frame::RenderedImage) -> Option<ImageSurface> {
+    let mut surface = ImageSurface::create(
+        gtk4::cairo::Format::ARgb32,
         img.width as i32,
         img.height as i32,
-        (img.width * 4) as i32,
     )
+    .ok()?;
+    let stride = surface.stride() as usize;
+    let w = img.width as usize;
+    let h = img.height as usize;
+    let mut data = surface.data().ok()?;
+    for y in 0..h {
+        let src_row = &img.data[y * w * 4..(y + 1) * w * 4];
+        let dst_row = &mut data[y * stride..y * stride + w * 4];
+        for x in 0..w {
+            let s = x * 4;
+            let a = src_row[s + 3] as u16;
+            let r = (src_row[s] as u16 * a + 127) / 255;
+            let g = (src_row[s + 1] as u16 * a + 127) / 255;
+            let b = (src_row[s + 2] as u16 * a + 127) / 255;
+            dst_row[s] = b as u8;
+            dst_row[s + 1] = g as u8;
+            dst_row[s + 2] = r as u8;
+            dst_row[s + 3] = a as u8;
+        }
+    }
+    drop(data);
+    Some(surface)
 }
 
 // ── Gate inspect helpers ──────────────────────────────────────────────────────
@@ -3306,6 +3606,19 @@ fn build_inspect_report(st: &RadarPaneState, clicked_ll: &LatLon) -> String {
             text.push_str(&format!("   Sender: {}\n", w.sender));
             text.push_str(&format!("   Effective: {}\n", w.effective));
             text.push_str(&format!("   Expires: {}\n", w.expires));
+            if w.event.to_lowercase().contains("special weather statement")
+                && !w.description.is_empty()
+            {
+                let desc = w
+                    .description
+                    .replace("\\n", "\n")
+                    .replace("\\\"", "\"")
+                    .replace("\\/", "/");
+                text.push_str("   Description:\n");
+                for line in desc.lines().filter(|l| !l.trim().is_empty()) {
+                    text.push_str(&format!("     {}\n", line.trim()));
+                }
+            }
             if !w.vtec.is_empty() {
                 text.push_str(&format!("   VTEC: {}\n", w.vtec));
             }
