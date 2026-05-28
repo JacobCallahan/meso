@@ -31,6 +31,8 @@ pub struct Warning {
     pub event: String,
     /// Issuing WFO name
     pub sender: String,
+    /// Alert description text from NWS properties.description
+    pub description: String,
     /// Polygon coordinates as raw string from API
     pub polygon_raw: String,
     /// VTEC string
@@ -50,6 +52,7 @@ impl Warning {
         expires: String,
         event: String,
         sender: String,
+        description: String,
         polygon_raw: String,
         vtec: String,
     ) -> Self {
@@ -64,6 +67,7 @@ impl Warning {
             expires,
             event,
             sender,
+            description,
             polygon_raw,
             vtec,
             is_current,
@@ -221,6 +225,7 @@ fn parse_alerts_json(json: &str) -> Result<Vec<Warning>> {
     let re_exp = Regex::new(r#""expires":\s*"([^"]*?)""#).unwrap();
     let re_event = Regex::new(r#""event":\s*"([^"]*?)""#).unwrap();
     let re_sender = Regex::new(r#""senderName":\s*"([^"]*?)""#).unwrap();
+    let re_desc = Regex::new(r#""description":\s*"([^"]*?)""#).unwrap();
     let re_vtec    = Regex::new(r"([A-Z0]\.[A-Z]{3}\.[A-Z]{4}\.[A-Z]{2}\.[A-Z]\.[0-9]{4}\.[0-9]{6}T[0-9]{4}Z-[0-9]{6}T[0-9]{4}Z)").unwrap();
 
     let compact = html.replace(' ', "");
@@ -232,18 +237,36 @@ fn parse_alerts_json(json: &str) -> Result<Vec<Warning>> {
             .collect()
     }
 
+    fn collect_descriptions<'a>(re: &Regex, text: &'a str) -> Vec<&'a str> {
+        re.captures_iter(text)
+            .filter_map(|c| {
+                let m = c.get(1)?;
+                let desc = m.as_str();
+                // Verify the capture is non-empty and doesn't look truncated.
+                // If it's suspiciously short or contains incomplete escape sequences, try fallback.
+                if desc.is_empty() || (desc.contains("\\") && desc.ends_with("\\")) {
+                    None
+                } else {
+                    Some(desc)
+                }
+            })
+            .collect()
+    }
+
     let urls = collect(&re_url, &html);
     let areas = collect(&re_area, &html);
     let effs = collect(&re_eff, &html);
     let exps = collect(&re_exp, &html);
     let events = collect(&re_event, &html);
     let senders = collect(&re_sender, &html);
+    let descriptions = collect_descriptions(&re_desc, &html);
     let polys = collect(&re_poly, &compact);
     let vtecs = collect(&re_vtec, &html);
 
     let n = urls.len();
     let mut warnings = Vec::with_capacity(n);
     for i in 0..n {
+        let desc = get(i, &descriptions);
         warnings.push(Warning::new(
             get(i, &urls),
             get(i, &areas),
@@ -251,6 +274,7 @@ fn parse_alerts_json(json: &str) -> Result<Vec<Warning>> {
             get(i, &exps),
             get(i, &events),
             get(i, &senders),
+            unescape_json_string(&desc),
             get(i, &polys),
             get(i, &vtecs),
         ));
@@ -260,6 +284,14 @@ fn parse_alerts_json(json: &str) -> Result<Vec<Warning>> {
 
 fn get(i: usize, v: &[&str]) -> String {
     v.get(i).copied().unwrap_or("").to_string()
+}
+
+fn unescape_json_string(s: &str) -> String {
+    s.replace("\\\"", "\"")
+        .replace("\\\\", "\\")
+        .replace("\\n", "\n")
+        .replace("\\r", "\r")
+        .replace("\\t", "\t")
 }
 
 // ── SPC products ──────────────────────────────────────────────────────────────

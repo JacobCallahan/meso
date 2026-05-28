@@ -13,6 +13,7 @@
 
 use anyhow::Result;
 use cairo::{Context, Format, ImageSurface};
+use std::collections::HashMap;
 
 use meso_data::map_data::MapData;
 use meso_data::radar::color_palette::ColorPalette;
@@ -34,7 +35,7 @@ pub fn render_level2(
     overlays: &OverlaySet,
     is_velocity: bool,
     map: Option<&MapData>,
-) -> Result<RenderedImage> {
+) -> Result<ImageSurface> {
     let quads = level2_to_quads(
         data,
         palette,
@@ -46,8 +47,49 @@ pub fn render_level2(
     render_quads_cairo(&quads, viewport, overlays, map)
 }
 
+/// Render a Level 2 scan to RGBA bytes suitable for cross-thread transport.
+pub fn render_level2_rgba(
+    data: &Level2Data,
+    palette: &ColorPalette,
+    viewport: &Viewport,
+    overlays: &OverlaySet,
+    is_velocity: bool,
+    map: Option<&MapData>,
+) -> Result<RenderedImage> {
+    let quads = level2_to_quads(
+        data,
+        palette,
+        viewport,
+        is_velocity,
+        overlays.qc_hide_no_data,
+        overlays.qc_mask_weak_echoes,
+    );
+    let surface = render_quads_cairo(&quads, viewport, overlays, map)?;
+    surface_to_rgba(surface, viewport.width, viewport.height)
+}
+
 /// Render a Level 3 scan to a CPU image using Cairo.
 pub fn render_level3(
+    data: &Level3Data,
+    palette: &ColorPalette,
+    viewport: &Viewport,
+    overlays: &OverlaySet,
+    is_velocity: bool,
+    map: Option<&MapData>,
+) -> Result<ImageSurface> {
+    let quads = level3_to_quads(
+        data,
+        palette,
+        viewport,
+        is_velocity,
+        overlays.qc_hide_no_data,
+        overlays.qc_mask_weak_echoes,
+    );
+    render_quads_cairo(&quads, viewport, overlays, map)
+}
+
+/// Render a Level 3 scan to RGBA bytes suitable for cross-thread transport.
+pub fn render_level3_rgba(
     data: &Level3Data,
     palette: &ColorPalette,
     viewport: &Viewport,
@@ -63,7 +105,8 @@ pub fn render_level3(
         overlays.qc_hide_no_data,
         overlays.qc_mask_weak_echoes,
     );
-    render_quads_cairo(&quads, viewport, overlays, map)
+    let surface = render_quads_cairo(&quads, viewport, overlays, map)?;
+    surface_to_rgba(surface, viewport.width, viewport.height)
 }
 
 /// Render only the map layer (no radar quads) — used for immediate viewport feedback
@@ -72,10 +115,10 @@ pub fn render_map_only(
     viewport: &Viewport,
     overlays: &OverlaySet,
     map: Option<&MapData>,
-) -> Result<RenderedImage> {
+) -> Result<ImageSurface> {
     let w = viewport.width as i32;
     let h = viewport.height as i32;
-    let mut surface = ImageSurface::create(Format::ARgb32, w, h)?;
+    let surface = ImageSurface::create(Format::ARgb32, w, h)?;
     {
         let ctx = Context::new(&surface)?;
 
@@ -100,23 +143,7 @@ pub fn render_map_only(
             draw_map_cairo(&ctx, map, viewport, overlays.roads_visible)?;
         }
     }
-    // Convert Cairo ARGB32 (premultiplied BGRA, native byte order) → RGBA
-    let data_surf = surface.data()?;
-    let mut out = RenderedImage::new(viewport.width, viewport.height);
-    for (i, chunk) in data_surf.chunks(4).enumerate() {
-        let b = chunk[0];
-        let g = chunk[1];
-        let r = chunk[2];
-        let a = chunk[3];
-        let idx = i * 4;
-        if idx + 3 < out.data.len() {
-            out.data[idx] = r;
-            out.data[idx + 1] = g;
-            out.data[idx + 2] = b;
-            out.data[idx + 3] = a;
-        }
-    }
-    Ok(out)
+    Ok(surface)
 }
 
 // ── Internal implementation ───────────────────────────────────────────────────
@@ -126,11 +153,11 @@ fn render_quads_cairo(
     viewport: &Viewport,
     overlays: &OverlaySet,
     map: Option<&MapData>,
-) -> Result<RenderedImage> {
+) -> Result<ImageSurface> {
     let w = viewport.width as i32;
     let h = viewport.height as i32;
 
-    let mut surface = ImageSurface::create(Format::ARgb32, w, h)?;
+    let surface = ImageSurface::create(Format::ARgb32, w, h)?;
 
     // All drawing in its own scope so ctx is dropped before we access surface data
     {
@@ -140,32 +167,34 @@ fn render_quads_cairo(
         ctx.set_source_rgb(0.0, 0.0, 0.0);
         ctx.paint()?;
 
-        // Draw radar quads
+        // Draw radar quads. Group by color to avoid one fill() per quad.
         let positions = &quads.positions;
         let colors = &quads.colors;
-        let n = quads.quad_count;
-
+        let n = quads
+            .quad_count
+            .min(positions.len() / 8)
+            .min(colors.len() / 12);
+        let mut buckets: HashMap<(u8, u8, u8), Vec<usize>> = HashMap::new();
         for i in 0..n {
-            let base_p = i * 8;
             let base_c = i * 12;
-            if base_p + 7 >= positions.len() || base_c + 2 >= colors.len() {
-                break;
+            let key = (colors[base_c], colors[base_c + 1], colors[base_c + 2]);
+            buckets.entry(key).or_default().push(i);
+        }
+        for ((r, g, b), indices) in buckets {
+            ctx.set_source_rgb(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+            for i in indices {
+                let base_p = i * 8;
+                let (x0, y0) = (positions[base_p] as f64, positions[base_p + 1] as f64);
+                let (x1, y1) = (positions[base_p + 2] as f64, positions[base_p + 3] as f64);
+                let (x2, y2) = (positions[base_p + 4] as f64, positions[base_p + 5] as f64);
+                let (x3, y3) = (positions[base_p + 6] as f64, positions[base_p + 7] as f64);
+
+                ctx.move_to(x0, y0);
+                ctx.line_to(x1, y1);
+                ctx.line_to(x2, y2);
+                ctx.line_to(x3, y3);
+                ctx.close_path();
             }
-            let r = colors[base_c] as f64 / 255.0;
-            let g = colors[base_c + 1] as f64 / 255.0;
-            let b = colors[base_c + 2] as f64 / 255.0;
-
-            let (x0, y0) = (positions[base_p] as f64, positions[base_p + 1] as f64);
-            let (x1, y1) = (positions[base_p + 2] as f64, positions[base_p + 3] as f64);
-            let (x2, y2) = (positions[base_p + 4] as f64, positions[base_p + 5] as f64);
-            let (x3, y3) = (positions[base_p + 6] as f64, positions[base_p + 7] as f64);
-
-            ctx.set_source_rgb(r, g, b);
-            ctx.move_to(x0, y0);
-            ctx.line_to(x1, y1);
-            ctx.line_to(x2, y2);
-            ctx.line_to(x3, y3);
-            ctx.close_path();
             ctx.fill()?;
         }
 
@@ -270,24 +299,27 @@ fn render_quads_cairo(
         }
     } // ctx dropped here
 
-    // Extract pixel data from surface
-    let data_surf = surface.data()?;
-    // Cairo ARGB32 is premultiplied BGRA in native byte order → convert to RGBA
-    let mut out = RenderedImage::new(viewport.width, viewport.height);
-    for (i, chunk) in data_surf.chunks(4).enumerate() {
-        let b = chunk[0];
-        let g = chunk[1];
-        let r = chunk[2];
-        let a = chunk[3];
-        let idx = i * 4;
-        if idx + 3 < out.data.len() {
-            out.data[idx] = r;
-            out.data[idx + 1] = g;
-            out.data[idx + 2] = b;
-            out.data[idx + 3] = a;
+    Ok(surface)
+}
+
+fn surface_to_rgba(mut surface: ImageSurface, width: u32, height: u32) -> Result<RenderedImage> {
+    let stride = surface.stride() as usize;
+    let w = width as usize;
+    let h = height as usize;
+    let data = surface.data()?;
+    let mut out = RenderedImage::new(width, height);
+    for y in 0..h {
+        let src_row = &data[y * stride..y * stride + w * 4];
+        let dst_row = &mut out.data[y * w * 4..(y + 1) * w * 4];
+        for x in 0..w {
+            let s = x * 4;
+            let d = s;
+            dst_row[d] = src_row[s + 2];
+            dst_row[d + 1] = src_row[s + 1];
+            dst_row[d + 2] = src_row[s];
+            dst_row[d + 3] = src_row[s + 3];
         }
     }
-
     Ok(out)
 }
 
@@ -330,15 +362,7 @@ fn draw_map_cairo(
     let h = viewport.height as f64;
 
     // Helper: check if a segment might be visible (rough bounding check)
-    let in_view = |lat1: f32, lon1: f32, lat2: f32, lon2: f32| -> bool {
-        let (x1, y1) = viewport.latlon_to_screen(&meso_data::geo::latlon::LatLon {
-            lat: lat1 as f64,
-            lon: lon1 as f64,
-        });
-        let (x2, y2) = viewport.latlon_to_screen(&meso_data::geo::latlon::LatLon {
-            lat: lat2 as f64,
-            lon: lon2 as f64,
-        });
+    let in_view = |x1: f64, y1: f64, x2: f64, y2: f64| -> bool {
         let margin = 20.0_f64;
         let min_x = x1.min(x2);
         let max_x = x1.max(x2);
@@ -349,9 +373,6 @@ fn draw_map_cairo(
 
     let draw_segments = |ctx: &Context, segs: &[meso_data::map_data::GeoSegment]| -> Result<()> {
         for seg in segs {
-            if !in_view(seg.lat1, seg.lon1, seg.lat2, seg.lon2) {
-                continue;
-            }
             let (x1, y1) = viewport.latlon_to_screen(&meso_data::geo::latlon::LatLon {
                 lat: seg.lat1 as f64,
                 lon: seg.lon1 as f64,
@@ -360,6 +381,9 @@ fn draw_map_cairo(
                 lat: seg.lat2 as f64,
                 lon: seg.lon2 as f64,
             });
+            if !in_view(x1, y1, x2, y2) {
+                continue;
+            }
             ctx.move_to(x1, y1);
             ctx.line_to(x2, y2);
         }
