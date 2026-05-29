@@ -3041,6 +3041,7 @@ fn request_anim_frame_rerender_async(
                 drawing_area.queue_draw();
                 return;
             }
+
             if let Ok(img) = result {
                 if let Some(surf) = rgba_to_surface(&img) {
                     if idx < st.anim_surfaces.len() {
@@ -3050,11 +3051,16 @@ fn request_anim_frame_rerender_async(
                         }
                         if idx == st.anim_index {
                             st.current_surface = Some(surf);
-                            st.anim_viewport_resync = false;
                         }
                     }
                 }
             }
+
+            // Always unblock the timer once the current frame's rerender attempt completes.
+            if idx == st.anim_index {
+                st.anim_viewport_resync = false;
+            }
+
             drop(st);
             drawing_area.queue_draw();
         },
@@ -3609,11 +3615,7 @@ fn build_inspect_report(st: &RadarPaneState, clicked_ll: &LatLon) -> String {
             if w.event.to_lowercase().contains("special weather statement")
                 && !w.description.is_empty()
             {
-                let desc = w
-                    .description
-                    .replace("\\n", "\n")
-                    .replace("\\\"", "\"")
-                    .replace("\\/", "/");
+                let desc = w.description.as_str();
                 text.push_str("   Description:\n");
                 for line in desc.lines().filter(|l| !l.trim().is_empty()) {
                     text.push_str(&format!("     {}\n", line.trim()));
