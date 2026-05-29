@@ -225,7 +225,7 @@ fn parse_alerts_json(json: &str) -> Result<Vec<Warning>> {
     let re_exp = Regex::new(r#""expires":\s*"([^"]*?)""#).unwrap();
     let re_event = Regex::new(r#""event":\s*"([^"]*?)""#).unwrap();
     let re_sender = Regex::new(r#""senderName":\s*"([^"]*?)""#).unwrap();
-    let re_desc = Regex::new(r#""description":\s*"([^"]*?)""#).unwrap();
+    let re_desc = Regex::new(r#""description":\s*"((?:\\.|[^"\\])*)""#).unwrap();
     let re_vtec    = Regex::new(r"([A-Z0]\.[A-Z]{3}\.[A-Z]{4}\.[A-Z]{2}\.[A-Z]\.[0-9]{4}\.[0-9]{6}T[0-9]{4}Z-[0-9]{6}T[0-9]{4}Z)").unwrap();
 
     let compact = html.replace(' ', "");
@@ -287,11 +287,9 @@ fn get(i: usize, v: &[&str]) -> String {
 }
 
 fn unescape_json_string(s: &str) -> String {
-    s.replace("\\\"", "\"")
-        .replace("\\\\", "\\")
-        .replace("\\n", "\n")
-        .replace("\\r", "\r")
-        .replace("\\t", "\t")
+    // `s` is the raw contents of a JSON string (without surrounding quotes).
+    // Wrap it back into a JSON string literal and let serde_json handle escapes.
+    serde_json::from_str::<String>(&format!("\"{}\"", s)).unwrap_or_else(|_| s.to_string())
 }
 
 // ── SPC products ──────────────────────────────────────────────────────────────
