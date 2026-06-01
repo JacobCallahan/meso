@@ -13,6 +13,7 @@ mod alerts_pane;
 mod app;
 mod config;
 mod forecast_pane;
+mod gl_blit;
 mod location_panel;
 mod models_pane;
 mod national_pane;

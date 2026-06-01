@@ -123,29 +123,52 @@ pub fn show_overlay_dialog(
         .build();
     win.set_child(Some(&scroll));
 
-    let cfg_close = Rc::clone(&shared_cfg);
-    let win_c = win.clone();
+    let apply_changes: Rc<dyn Fn()> = {
+        let cfg_apply = Rc::clone(&shared_cfg);
+        let on_apply = Rc::new(on_apply);
+        let chk_warnings = chk_warnings.clone();
+        let chk_tracks = chk_tracks.clone();
+        let chk_major_roads = chk_major_roads.clone();
+        let chk_rings = chk_rings.clone();
+        let chk_hide_no_data = chk_hide_no_data.clone();
+        let chk_mask_weak = chk_mask_weak.clone();
+        let chk_track_points = chk_track_points.clone();
+        let chk_track_lines = chk_track_lines.clone();
+        let chk_track_vector = chk_track_vector.clone();
+        let ref_combo = ref_combo.clone();
+        let vel_combo = vel_combo.clone();
+        Rc::new(move || {
+            {
+                let mut cfg = cfg_apply.borrow_mut();
+                cfg.radar_show_warnings = chk_warnings.is_active();
+                cfg.radar_show_storm_tracks = chk_tracks.is_active();
+                cfg.radar_show_major_roads = chk_major_roads.is_active();
+                cfg.radar_show_rings = chk_rings.is_active();
+                cfg.radar_qc_hide_no_data = chk_hide_no_data.is_active();
+                cfg.radar_qc_mask_weak_echoes = chk_mask_weak.is_active();
+                cfg.radar_show_track_points = chk_track_points.is_active();
+                cfg.radar_show_track_lines = chk_track_lines.is_active();
+                cfg.radar_show_track_vector = chk_track_vector.is_active();
+                if let Some(name) = REF_PALETTE_NAMES.get(ref_combo.selected() as usize) {
+                    cfg.radar_palette_ref = name.to_string();
+                }
+                if let Some(name) = VEL_PALETTE_NAMES.get(vel_combo.selected() as usize) {
+                    cfg.radar_palette_vel = name.to_string();
+                }
+            }
+            on_apply();
+        })
+    };
+
+    let win_close = win.clone();
     close_btn.connect_clicked(move |_| {
-        {
-            let mut cfg = cfg_close.borrow_mut();
-            cfg.radar_show_warnings = chk_warnings.is_active();
-            cfg.radar_show_storm_tracks = chk_tracks.is_active();
-            cfg.radar_show_major_roads = chk_major_roads.is_active();
-            cfg.radar_show_rings = chk_rings.is_active();
-            cfg.radar_qc_hide_no_data = chk_hide_no_data.is_active();
-            cfg.radar_qc_mask_weak_echoes = chk_mask_weak.is_active();
-            cfg.radar_show_track_points = chk_track_points.is_active();
-            cfg.radar_show_track_lines = chk_track_lines.is_active();
-            cfg.radar_show_track_vector = chk_track_vector.is_active();
-            if let Some(name) = REF_PALETTE_NAMES.get(ref_combo.selected() as usize) {
-                cfg.radar_palette_ref = name.to_string();
-            }
-            if let Some(name) = VEL_PALETTE_NAMES.get(vel_combo.selected() as usize) {
-                cfg.radar_palette_vel = name.to_string();
-            }
-        }
-        on_apply();
-        win_c.close();
+        win_close.close();
+    });
+
+    let apply_changes_close = Rc::clone(&apply_changes);
+    win.connect_close_request(move |_| {
+        apply_changes_close();
+        gtk4::glib::Propagation::Proceed
     });
 
     win.present();
