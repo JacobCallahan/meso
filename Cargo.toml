@@ -54,6 +54,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Geo/math
 geo = "0.28"
+rayon = "1.8"
 
 # GTK4
 gtk4 = { version = "0.9", features = ["v4_12"] }
@@ -65,6 +66,7 @@ gdk-pixbuf = "0.20"
 # OpenGL / GPU
 wgpu = { version = "22", features = ["wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.3"
 
 # Cairo (CPU fallback)
 cairo-rs = "0.20"

@@ -1,16 +1,14 @@
 /*
- * Geometry generation: convert decoded radar data → screen-space vertices.
+ * Geometry generation: convert decoded radar data → radar-space vertices in kilometers.
  *
  * Both Level 2 and Level 3 data ultimately produce a set of colored triangles
- * (quad pairs) that fill the radar display.  This module handles the
- * coordinate transformation from radar-polar space to screen pixels.
- *
- * This is the Rust port of the core wX JNI functions:
- *   genMercator / genIndex / decode8BitAndGenRadials / colorGen
+ * (quad pairs) that fill the radar display. This module handles the
+ * coordinate generation from radar-polar space to kilometers relative to the site.
  */
 
+use rayon::prelude::*;
+
 use meso_data::geo::latlon::LatLon;
-use meso_data::radar::color_palette::ColorPalette;
 use meso_data::radar::level2::{Level2Data, NUM_RANGE_BINS};
 use meso_data::radar::level3::Level3Data;
 
@@ -28,17 +26,17 @@ pub struct ColorVertex {
     pub b: u8,
 }
 
-/// Quad strip output: screen-space vertices + colors ready to upload to GPU.
+/// Quad strip output: radar-space (km) vertices + levels ready to upload to GPU.
 /// Each quad is 4 vertices (CCW winding), indexed as a triangle strip:
 ///   0─1
 ///   │/│
 ///   3─2
 #[derive(Debug, Clone, Default)]
 pub struct QuadBuffer {
-    /// Packed f32 positions: [x0,y0, x1,y1, x2,y2, x3,y3, ...] per quad.
+    /// Packed f32 positions: [x0,y0, x1,y1, x2,y2, x3,y3, ...] per quad in kilometers.
     pub positions: Vec<f32>,
-    /// Packed u8 RGB colors: [r,g,b, r,g,b, r,g,b, r,g,b, ...] per vertex.
-    pub colors: Vec<u8>,
+    /// Raw bin levels: [l0, l1, l2, l3, ...] per vertex (1 byte per vertex, 4 bytes per quad).
+    pub levels: Vec<u8>,
     /// Number of quads (4 vertices each).
     pub quad_count: usize,
 }
@@ -47,7 +45,7 @@ impl QuadBuffer {
     pub fn new() -> Self {
         QuadBuffer {
             positions: Vec::new(),
-            colors: Vec::new(),
+            levels: Vec::new(),
             quad_count: 0,
         }
     }
@@ -55,7 +53,7 @@ impl QuadBuffer {
     pub fn with_capacity(quads: usize) -> Self {
         QuadBuffer {
             positions: Vec::with_capacity(quads * 8),
-            colors: Vec::with_capacity(quads * 12),
+            levels: Vec::with_capacity(quads * 4),
             quad_count: 0,
         }
     }
@@ -67,14 +65,12 @@ impl QuadBuffer {
         (x1, y1): (f32, f32),
         (x2, y2): (f32, f32),
         (x3, y3): (f32, f32),
-        (r, g, b): (u8, u8, u8),
+        level: u8,
     ) {
         self.positions
             .extend_from_slice(&[x0, y0, x1, y1, x2, y2, x3, y3]);
         for _ in 0..4 {
-            self.colors.push(r);
-            self.colors.push(g);
-            self.colors.push(b);
+            self.levels.push(level);
         }
         self.quad_count += 1;
     }
@@ -87,14 +83,12 @@ const BLACK_HOLE_REF_KM: f64 = 4.0;
 /// Smaller black hole for velocity products.
 const BLACK_HOLE_VEL_KM: f64 = 1.0;
 
-/// Generate screen-space quad geometry from Level 2 decoded data.
+/// Generate radar-relative quad geometry in kilometers from Level 2 decoded data.
 ///
-/// Produces one quad per contiguous run of equal gate values per radial,
-/// exactly matching wX's rendering approach.
+/// Parallelized via Rayon, processing each radial on a separate thread and
+/// accumulating results.
 pub fn level2_to_quads(
     data: &Level2Data,
-    palette: &ColorPalette,
-    viewport: &Viewport,
     is_velocity: bool,
     hide_no_data: bool,
     mask_weak_echoes: bool,
@@ -111,73 +105,75 @@ pub fn level2_to_quads(
     };
     let bin_size = data.bin_size_km as f64;
 
-    // Estimate capacity: ~720 radials × ~400 runs each
-    let mut buf = QuadBuffer::with_capacity(num_radials * 400);
+    // Process radials in parallel
+    let results: Vec<QuadBuffer> = (0..num_radials)
+        .into_par_iter()
+        .map(|r| {
+            let az0 = data.azimuths[r] as f64;
+            let az1 = data.azimuths[(r + 1) % num_radials] as f64;
 
-    for r in 0..num_radials {
-        let az0 = data.azimuths[r] as f64;
-        let az1 = data.azimuths[(r + 1) % num_radials] as f64;
+            let cos0 = az0.to_radians().cos();
+            let sin0 = az0.to_radians().sin();
+            let cos1 = az1.to_radians().cos();
+            let sin1 = az1.to_radians().sin();
 
-        let cos0 = az0.to_radians().cos();
-        let sin0 = az0.to_radians().sin();
-        let cos1 = az1.to_radians().cos();
-        let sin1 = az1.to_radians().sin();
+            let bins = &data.bins[r * NUM_RANGE_BINS..(r + 1) * NUM_RANGE_BINS];
+            let mut local_buf = QuadBuffer::with_capacity(128);
 
-        let bins = &data.bins[r * NUM_RANGE_BINS..(r + 1) * NUM_RANGE_BINS];
+            // Run-length encode identical gate values
+            let mut run_start_km = black_hole;
+            let mut run_level = bins[0];
+            let mut run_count = 0usize;
 
-        // Run-length encode identical gate values
-        let mut run_start_km = black_hole;
-        let mut run_level = bins[0];
-        let mut run_count = 0usize;
+            let bin_start_index = (black_hole / bin_size).ceil() as usize;
 
-        let bin_start_index = (black_hole / bin_size).ceil() as usize;
-
-        for (b, &level) in bins.iter().enumerate().skip(bin_start_index) {
-            if level == run_level {
-                run_count += 1;
-            } else {
-                if run_count > 0
-                    && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes)
-                {
-                    let r0 = run_start_km;
-                    let r1 = r0 + run_count as f64 * bin_size;
-                    let color = gate_color(run_level, palette);
-                    emit_quad_km(&mut buf, r0, r1, cos0, sin0, cos1, sin1, color, viewport);
+            for (b, &level) in bins.iter().enumerate().skip(bin_start_index) {
+                if level == run_level {
+                    run_count += 1;
+                } else {
+                    if run_count > 0
+                        && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes)
+                    {
+                        let r0 = run_start_km;
+                        let r1 = r0 + run_count as f64 * bin_size;
+                        emit_quad_km(&mut local_buf, r0, r1, cos0, sin0, cos1, sin1, run_level);
+                    }
+                    run_level = level;
+                    run_start_km = b as f64 * bin_size;
+                    run_count = 1;
                 }
-                run_level = level;
-                run_start_km = b as f64 * bin_size;
-                run_count = 1;
             }
-        }
-        if run_count > 0 && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes) {
-            let r0 = run_start_km;
-            let r1 = r0 + run_count as f64 * bin_size;
-            let color = gate_color(run_level, palette);
-            emit_quad_km(&mut buf, r0, r1, cos0, sin0, cos1, sin1, color, viewport);
-        }
+            if run_count > 0 && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes)
+            {
+                let r0 = run_start_km;
+                let r1 = r0 + run_count as f64 * bin_size;
+                emit_quad_km(&mut local_buf, r0, r1, cos0, sin0, cos1, sin1, run_level);
+            }
+            local_buf
+        })
+        .collect();
+
+    // Reduce into a single buffer
+    let total_quads: usize = results.iter().map(|b| b.quad_count).sum();
+    let mut buf = QuadBuffer::with_capacity(total_quads);
+    for mut local_buf in results {
+        buf.positions.append(&mut local_buf.positions);
+        buf.levels.append(&mut local_buf.levels);
+        buf.quad_count += local_buf.quad_count;
     }
 
     buf
 }
 
-/// Generate screen-space quad geometry from Level 3 decoded data.
+/// Generate radar-relative quad geometry in kilometers from Level 3 decoded data.
 pub fn level3_to_quads(
     data: &Level3Data,
-    palette: &ColorPalette,
-    viewport: &Viewport,
     is_velocity: bool,
     hide_no_data: bool,
     mask_weak_echoes: bool,
 ) -> QuadBuffer {
     if data.is_raster {
-        return level3_raster_to_quads(
-            data,
-            palette,
-            viewport,
-            is_velocity,
-            hide_no_data,
-            mask_weak_echoes,
-        );
+        return level3_raster_to_quads(data, is_velocity, hide_no_data, mask_weak_echoes);
     }
 
     let num_radials = data.num_radials;
@@ -192,62 +188,71 @@ pub fn level3_to_quads(
     };
     let bin_size = data.bin_size_km as f64;
 
-    let mut buf = QuadBuffer::with_capacity(num_radials * 300);
+    let results: Vec<QuadBuffer> = (0..num_radials)
+        .into_par_iter()
+        .map(|r| {
+            let az0 = data.azimuths[r] as f64;
+            let az1 = data.azimuths[(r + 1) % num_radials] as f64;
 
-    for r in 0..num_radials {
-        let az0 = data.azimuths[r] as f64;
-        let az1 = data.azimuths[(r + 1) % num_radials] as f64;
+            let cos0 = az0.to_radians().cos();
+            let sin0 = az0.to_radians().sin();
+            let cos1 = az1.to_radians().cos();
+            let sin1 = az1.to_radians().sin();
 
-        let cos0 = az0.to_radians().cos();
-        let sin0 = az0.to_radians().sin();
-        let cos1 = az1.to_radians().cos();
-        let sin1 = az1.to_radians().sin();
+            let bins = &data.bins[r * data.num_range_bins..(r + 1) * data.num_range_bins];
+            let num_bins = data.num_range_bins;
+            let mut local_buf = QuadBuffer::with_capacity(128);
 
-        let bins = &data.bins[r * data.num_range_bins..(r + 1) * data.num_range_bins];
-        let num_bins = data.num_range_bins;
-
-        let bin_start_index = (black_hole / bin_size).ceil() as usize;
-        let mut run_start_km = bin_start_index as f64 * bin_size;
-        let mut run_level = if bin_start_index < num_bins {
-            bins[bin_start_index]
-        } else {
-            0
-        };
-        let mut run_count = 0usize;
-
-        for (b, &level) in bins.iter().enumerate().skip(bin_start_index) {
-            if level == run_level {
-                run_count += 1;
+            let bin_start_index = (black_hole / bin_size).ceil() as usize;
+            let mut run_start_km = bin_start_index as f64 * bin_size;
+            let mut run_level = if bin_start_index < num_bins {
+                bins[bin_start_index]
             } else {
-                if run_count > 0
-                    && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes)
-                {
-                    let r0 = run_start_km;
-                    let r1 = r0 + run_count as f64 * bin_size;
-                    let color = gate_color(run_level, palette);
-                    emit_quad_km(&mut buf, r0, r1, cos0, sin0, cos1, sin1, color, viewport);
+                0
+            };
+            let mut run_count = 0usize;
+
+            for (b, &level) in bins.iter().enumerate().skip(bin_start_index) {
+                if level == run_level {
+                    run_count += 1;
+                } else {
+                    if run_count > 0
+                        && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes)
+                    {
+                        let r0 = run_start_km;
+                        let r1 = r0 + run_count as f64 * bin_size;
+                        emit_quad_km(&mut local_buf, r0, r1, cos0, sin0, cos1, sin1, run_level);
+                    }
+                    run_level = level;
+                    run_start_km = b as f64 * bin_size;
+                    run_count = 1;
                 }
-                run_level = level;
-                run_start_km = b as f64 * bin_size;
-                run_count = 1;
             }
-        }
-        if run_count > 0 && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes) {
-            let r0 = run_start_km;
-            let r1 = r0 + run_count as f64 * bin_size;
-            let color = gate_color(run_level, palette);
-            emit_quad_km(&mut buf, r0, r1, cos0, sin0, cos1, sin1, color, viewport);
-        }
+            if run_count > 0 && gate_visible(run_level, is_velocity, hide_no_data, mask_weak_echoes)
+            {
+                let r0 = run_start_km;
+                let r1 = r0 + run_count as f64 * bin_size;
+                emit_quad_km(&mut local_buf, r0, r1, cos0, sin0, cos1, sin1, run_level);
+            }
+            local_buf
+        })
+        .collect();
+
+    // Reduce into a single buffer
+    let total_quads: usize = results.iter().map(|b| b.quad_count).sum();
+    let mut buf = QuadBuffer::with_capacity(total_quads);
+    for mut local_buf in results {
+        buf.positions.append(&mut local_buf.positions);
+        buf.levels.append(&mut local_buf.levels);
+        buf.quad_count += local_buf.quad_count;
     }
 
     buf
 }
 
-/// Generate screen-space quads for raster Level 3 products (packet 0xBA07).
+/// Generate radar-relative quads for raster Level 3 products (packet 0xBA07).
 fn level3_raster_to_quads(
     data: &Level3Data,
-    palette: &ColorPalette,
-    viewport: &Viewport,
     is_velocity: bool,
     hide_no_data: bool,
     mask_weak_echoes: bool,
@@ -261,38 +266,45 @@ fn level3_raster_to_quads(
     let cell_km = data.bin_size_km as f64;
     let half_rows = rows as f64 / 2.0;
     let half_cols = cols as f64 / 2.0;
-    let mut buf = QuadBuffer::with_capacity(rows * cols / 2);
 
-    for row in 0..rows {
-        for col in 0..cols {
-            let level = data.bins[row * cols + col];
-            if !gate_visible(level, is_velocity, hide_no_data, mask_weak_echoes) {
-                continue;
+    let results: Vec<QuadBuffer> = (0..rows)
+        .into_par_iter()
+        .map(|row| {
+            let mut local_buf = QuadBuffer::with_capacity(cols / 2);
+            for col in 0..cols {
+                let level = data.bins[row * cols + col];
+                if !gate_visible(level, is_velocity, hide_no_data, mask_weak_echoes) {
+                    continue;
+                }
+
+                let x0_km = (col as f64 - half_cols) * cell_km;
+                let y0_km = (row as f64 - half_rows) * -cell_km;
+                let x1_km = x0_km;
+                let y1_km = (row as f64 + 1.0 - half_rows) * -cell_km;
+                let x2_km = (col as f64 + 1.0 - half_cols) * cell_km;
+                let y2_km = y1_km;
+                let x3_km = x2_km;
+                let y3_km = y0_km;
+
+                local_buf.push_quad(
+                    (x0_km as f32, y0_km as f32),
+                    (x1_km as f32, y1_km as f32),
+                    (x2_km as f32, y2_km as f32),
+                    (x3_km as f32, y3_km as f32),
+                    level,
+                );
             }
+            local_buf
+        })
+        .collect();
 
-            let x0_km = (col as f64 - half_cols) * cell_km;
-            let y0_km = (row as f64 - half_rows) * -cell_km;
-            let x1_km = x0_km;
-            let y1_km = (row as f64 + 1.0 - half_rows) * -cell_km;
-            let x2_km = (col as f64 + 1.0 - half_cols) * cell_km;
-            let y2_km = y1_km;
-            let x3_km = x2_km;
-            let y3_km = y0_km;
-
-            let (x0, y0) = viewport.radar_km_to_screen(x0_km, y0_km);
-            let (x1, y1) = viewport.radar_km_to_screen(x1_km, y1_km);
-            let (x2, y2) = viewport.radar_km_to_screen(x2_km, y2_km);
-            let (x3, y3) = viewport.radar_km_to_screen(x3_km, y3_km);
-            let color = gate_color(level, palette);
-
-            buf.push_quad(
-                (x0 as f32, y0 as f32),
-                (x1 as f32, y1 as f32),
-                (x2 as f32, y2 as f32),
-                (x3 as f32, y3 as f32),
-                color,
-            );
-        }
+    // Reduce into a single buffer
+    let total_quads: usize = results.iter().map(|b| b.quad_count).sum();
+    let mut buf = QuadBuffer::with_capacity(total_quads);
+    for mut local_buf in results {
+        buf.positions.append(&mut local_buf.positions);
+        buf.levels.append(&mut local_buf.levels);
+        buf.quad_count += local_buf.quad_count;
     }
 
     buf
@@ -313,15 +325,6 @@ fn gate_visible(level: u8, is_velocity: bool, hide_no_data: bool, mask_weak_echo
 }
 
 #[inline]
-fn gate_color(level: u8, palette: &ColorPalette) -> (u8, u8, u8) {
-    if level == 0 {
-        (18, 18, 18)
-    } else {
-        palette.color(level)
-    }
-}
-
-#[inline]
 #[allow(clippy::too_many_arguments)]
 fn emit_quad_km(
     buf: &mut QuadBuffer,
@@ -331,25 +334,23 @@ fn emit_quad_km(
     sin0: f64,
     cos1: f64,
     sin1: f64,
-    color: (u8, u8, u8),
-    vp: &Viewport,
+    level: u8,
 ) {
     // Azimuth convention: angle 0 = North (up), increasing clockwise.
-    // In screen coords: x = East, y = Down.
-    // radar x_km = r * sin(az),  y_km = r * cos(az)
-    let to_screen = |r: f64, cos: f64, sin: f64| -> (f32, f32) {
+    // In radar coords (km): x = East (+), y = North (+)
+    // radar x_km = r * sin(az), y_km = r * cos(az)
+    let to_km = |r: f64, cos: f64, sin: f64| -> (f32, f32) {
         let x_km = r * sin;
         let y_km = r * cos;
-        let (px, py) = vp.radar_km_to_screen(x_km, y_km);
-        (px as f32, py as f32)
+        (x_km as f32, y_km as f32)
     };
 
-    let v0 = to_screen(r0, cos1, sin1); // near, next azimuth
-    let v1 = to_screen(r1, cos1, sin1); // far, next azimuth
-    let v2 = to_screen(r1, cos0, sin0); // far, current azimuth
-    let v3 = to_screen(r0, cos0, sin0); // near, current azimuth
+    let v0 = to_km(r0, cos1, sin1); // near, next azimuth
+    let v1 = to_km(r1, cos1, sin1); // far, next azimuth
+    let v2 = to_km(r1, cos0, sin0); // far, current azimuth
+    let v3 = to_km(r0, cos0, sin0); // near, current azimuth
 
-    buf.push_quad(v0, v1, v2, v3, color);
+    buf.push_quad(v0, v1, v2, v3, level);
 }
 
 // ── Warning polygon geometry ──────────────────────────────────────────────────
@@ -368,13 +369,15 @@ pub fn warning_to_lines(polygon: &[LatLon], viewport: &Viewport) -> Vec<(f32, f3
 #[cfg(test)]
 mod tests {
     use super::*;
+    use meso_data::radar::level2::{Level2Data, NUM_RANGE_BINS};
+    use meso_data::radar::level3::Level3Data;
 
     #[test]
     fn quad_buffer_new_is_empty() {
         let buf = QuadBuffer::new();
         assert_eq!(buf.quad_count, 0);
         assert!(buf.positions.is_empty());
-        assert!(buf.colors.is_empty());
+        assert!(buf.levels.is_empty());
     }
 
     #[test]
@@ -383,8 +386,8 @@ mod tests {
         assert_eq!(buf.quad_count, 0);
         // Capacity should be at least 100*8 = 800 for positions.
         assert!(buf.positions.capacity() >= 800);
-        // Capacity should be at least 100*12 = 1200 for colors.
-        assert!(buf.colors.capacity() >= 1200);
+        // Capacity should be at least 100*4 = 400 for levels.
+        assert!(buf.levels.capacity() >= 400);
     }
 
     #[test]
@@ -392,6 +395,105 @@ mod tests {
         let buf = QuadBuffer::new();
         assert_eq!(buf.quad_count, 0);
         assert!(buf.positions.is_empty());
-        assert!(buf.colors.is_empty());
+        assert!(buf.levels.is_empty());
+    }
+
+    // ── Level2 geometry tests ─────────────────────────────────────────────────
+
+    fn make_level2(n_radials: usize, fill_level: u8) -> Level2Data {
+        let mut azimuths = Vec::with_capacity(n_radials);
+        for i in 0..n_radials {
+            azimuths.push((360.0 * i as f32) / n_radials as f32);
+        }
+        let bins = vec![fill_level; n_radials * NUM_RANGE_BINS];
+        Level2Data {
+            azimuths,
+            bins,
+            julian_date: 1,
+            millis: 0,
+            bin_size_km: 0.25,
+            num_radials: n_radials,
+            elevation_angle_deg: 0.5,
+        }
+    }
+
+    #[test]
+    fn level2_to_quads_empty_radials_returns_empty() {
+        let data = make_level2(0, 50);
+        let buf = level2_to_quads(&data, false, false, false);
+        assert_eq!(buf.quad_count, 0);
+        assert!(buf.positions.is_empty());
+        assert!(buf.levels.is_empty());
+    }
+
+    #[test]
+    fn level2_to_quads_all_no_data_with_hide_returns_empty() {
+        // Level 0 == no-data; with hide_no_data=true should produce no quads.
+        let data = make_level2(4, 0);
+        let buf = level2_to_quads(&data, false, true, false);
+        assert_eq!(buf.quad_count, 0);
+    }
+
+    #[test]
+    fn level2_to_quads_positions_and_levels_consistent() {
+        let n_radials = 8;
+        let data = make_level2(n_radials, 50);
+        let buf = level2_to_quads(&data, false, false, false);
+        // Each quad = 4 vertices = 8 f32 positions + 4 level bytes.
+        assert_eq!(buf.positions.len(), buf.quad_count * 8);
+        assert_eq!(buf.levels.len(), buf.quad_count * 4);
+        // All levels should be 50.
+        assert!(buf.levels.iter().all(|&l| l == 50));
+    }
+
+    #[test]
+    fn level2_to_quads_parallel_matches_sequential() {
+        // With all bins the same level, run-length encoding produces exactly
+        // 1 quad per radial (the single run spanning black_hole to the end).
+        let n_radials = 36;
+        let data = make_level2(n_radials, 80);
+        let buf = level2_to_quads(&data, false, false, false);
+
+        // One quad per radial (whole row is a single RLE run).
+        assert_eq!(
+            buf.quad_count, n_radials,
+            "expected 1 quad per radial with uniform fill"
+        );
+        assert_eq!(buf.positions.len(), buf.quad_count * 8);
+        assert_eq!(buf.levels.len(), buf.quad_count * 4);
+        assert!(buf.levels.iter().all(|&l| l == 80));
+    }
+
+    // ── Level3 geometry tests ─────────────────────────────────────────────────
+
+    fn make_level3_radial(n_radials: usize, n_bins: usize, fill_level: u8) -> Level3Data {
+        Level3Data {
+            is_raster: false,
+            num_radials: n_radials,
+            num_range_bins: n_bins,
+            azimuths: (0..n_radials)
+                .map(|i| (360.0 * i as f32) / n_radials as f32)
+                .collect(),
+            bins: vec![fill_level; n_radials * n_bins],
+            bin_size_km: 1.0,
+            product_code: 94,
+            vcp: 212,
+            scan_date: 1,
+            scan_time_secs: 0,
+        }
+    }
+
+    #[test]
+    fn level3_to_quads_radial_positions_levels_consistent() {
+        let buf = level3_to_quads(&make_level3_radial(8, 100, 60), false, false, false);
+        assert_eq!(buf.positions.len(), buf.quad_count * 8);
+        assert_eq!(buf.levels.len(), buf.quad_count * 4);
+        assert!(buf.levels.iter().all(|&l| l == 60));
+    }
+
+    #[test]
+    fn level3_to_quads_all_no_data_hide_returns_empty() {
+        let buf = level3_to_quads(&make_level3_radial(4, 50, 0), false, true, false);
+        assert_eq!(buf.quad_count, 0);
     }
 }

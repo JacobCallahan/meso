@@ -38,13 +38,11 @@ pub fn render_level2(
 ) -> Result<ImageSurface> {
     let quads = level2_to_quads(
         data,
-        palette,
-        viewport,
         is_velocity,
         overlays.qc_hide_no_data,
         overlays.qc_mask_weak_echoes,
     );
-    render_quads_cairo(&quads, viewport, overlays, map)
+    render_quads_cairo(&quads, palette, viewport, overlays, map)
 }
 
 /// Render a Level 2 scan to RGBA bytes suitable for cross-thread transport.
@@ -58,13 +56,11 @@ pub fn render_level2_rgba(
 ) -> Result<RenderedImage> {
     let quads = level2_to_quads(
         data,
-        palette,
-        viewport,
         is_velocity,
         overlays.qc_hide_no_data,
         overlays.qc_mask_weak_echoes,
     );
-    let surface = render_quads_cairo(&quads, viewport, overlays, map)?;
+    let surface = render_quads_cairo(&quads, palette, viewport, overlays, map)?;
     surface_to_rgba(surface, viewport.width, viewport.height)
 }
 
@@ -79,13 +75,11 @@ pub fn render_level3(
 ) -> Result<ImageSurface> {
     let quads = level3_to_quads(
         data,
-        palette,
-        viewport,
         is_velocity,
         overlays.qc_hide_no_data,
         overlays.qc_mask_weak_echoes,
     );
-    render_quads_cairo(&quads, viewport, overlays, map)
+    render_quads_cairo(&quads, palette, viewport, overlays, map)
 }
 
 /// Render a Level 3 scan to RGBA bytes suitable for cross-thread transport.
@@ -99,13 +93,11 @@ pub fn render_level3_rgba(
 ) -> Result<RenderedImage> {
     let quads = level3_to_quads(
         data,
-        palette,
-        viewport,
         is_velocity,
         overlays.qc_hide_no_data,
         overlays.qc_mask_weak_echoes,
     );
-    let surface = render_quads_cairo(&quads, viewport, overlays, map)?;
+    let surface = render_quads_cairo(&quads, palette, viewport, overlays, map)?;
     surface_to_rgba(surface, viewport.width, viewport.height)
 }
 
@@ -148,8 +140,18 @@ pub fn render_map_only(
 
 // ── Internal implementation ───────────────────────────────────────────────────
 
+#[inline]
+fn gate_color(level: u8, palette: &ColorPalette) -> (u8, u8, u8) {
+    if level == 0 {
+        (18, 18, 18)
+    } else {
+        palette.color(level)
+    }
+}
+
 fn render_quads_cairo(
     quads: &QuadBuffer,
+    palette: &ColorPalette,
     viewport: &Viewport,
     overlays: &OverlaySet,
     map: Option<&MapData>,
@@ -169,25 +171,30 @@ fn render_quads_cairo(
 
         // Draw radar quads. Group by color to avoid one fill() per quad.
         let positions = &quads.positions;
-        let colors = &quads.colors;
+        let levels = &quads.levels;
         let n = quads
             .quad_count
             .min(positions.len() / 8)
-            .min(colors.len() / 12);
+            .min(levels.len() / 4);
         let mut buckets: HashMap<(u8, u8, u8), Vec<usize>> = HashMap::new();
         for i in 0..n {
-            let base_c = i * 12;
-            let key = (colors[base_c], colors[base_c + 1], colors[base_c + 2]);
+            let lvl = levels[i * 4];
+            let key = gate_color(lvl, palette);
             buckets.entry(key).or_default().push(i);
         }
         for ((r, g, b), indices) in buckets {
             ctx.set_source_rgb(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
             for i in indices {
                 let base_p = i * 8;
-                let (x0, y0) = (positions[base_p] as f64, positions[base_p + 1] as f64);
-                let (x1, y1) = (positions[base_p + 2] as f64, positions[base_p + 3] as f64);
-                let (x2, y2) = (positions[base_p + 4] as f64, positions[base_p + 5] as f64);
-                let (x3, y3) = (positions[base_p + 6] as f64, positions[base_p + 7] as f64);
+                let (x0_km, y0_km) = (positions[base_p] as f64, positions[base_p + 1] as f64);
+                let (x1_km, y1_km) = (positions[base_p + 2] as f64, positions[base_p + 3] as f64);
+                let (x2_km, y2_km) = (positions[base_p + 4] as f64, positions[base_p + 5] as f64);
+                let (x3_km, y3_km) = (positions[base_p + 6] as f64, positions[base_p + 7] as f64);
+
+                let (x0, y0) = viewport.radar_km_to_screen(x0_km, y0_km);
+                let (x1, y1) = viewport.radar_km_to_screen(x1_km, y1_km);
+                let (x2, y2) = viewport.radar_km_to_screen(x2_km, y2_km);
+                let (x3, y3) = viewport.radar_km_to_screen(x3_km, y3_km);
 
                 ctx.move_to(x0, y0);
                 ctx.line_to(x1, y1);

@@ -19,8 +19,8 @@
 use gtk4::cairo::ImageSurface;
 use gtk4::prelude::*;
 use gtk4::{
-    Box as GBox, Button, DrawingArea, DropDown, Label, Orientation, Overlay, Popover, Scale,
-    ScrolledWindow, SpinButton, StringList, TextView,
+    Box as GBox, Button, DrawingArea, DropDown, GLArea, Label, Orientation, Overlay, Popover,
+    Scale, ScrolledWindow, SpinButton, StringList, TextView,
 };
 
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -88,9 +88,20 @@ struct RadarPaneState {
     anim_viewport_resync: bool,
     anim_frame_stale: Vec<bool>,
     anim_frame_inflight: Vec<bool>,
+    // Temporary safety: serialize GPU animation frame renders so shared wgpu resources
+    // (notably uniform buffers) cannot race across concurrent frame jobs.
+    anim_render_lock: Arc<Mutex<()>>,
     render_generation: u64,
-    map_cache_key: Option<MapCacheKey>,
+    cached_map_cache_key: Option<MapCacheKey>,
     cached_map_surface: Option<ImageSurface>,
+    use_gpu: bool,
+    wgpu_ctx: Option<meso_render::wgpu_render::WgpuContext>,
+    wgpu_pipeline: Option<Arc<meso_render::wgpu_render::RadarPipeline>>,
+    wgpu_map_geometry: Option<Arc<meso_render::wgpu_render::WgpuMapGeometry>>,
+    wgpu_anim: Option<Arc<meso_render::wgpu_render::WgpuRadarAnimation>>,
+    wgpu_geo: Option<Arc<meso_render::wgpu_render::WgpuRadarGeometry>>,
+    gl_display: Option<GLArea>,
+    gl_blit: Option<crate::gl_blit::GlBlitContext>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,7 +138,7 @@ impl RadarPaneState {
         overlays.roads_visible = cfg.radar_show_major_roads;
         overlays.qc_hide_no_data = cfg.radar_qc_hide_no_data;
         overlays.qc_mask_weak_echoes = cfg.radar_qc_mask_weak_echoes;
-        RadarPaneState {
+        let mut st = RadarPaneState {
             site_id: cfg.radar_site.clone(),
             product: RadarProduct::from_code(product_code)
                 .filter(|p| p.is_map_supported() && p.supports_site(&cfg.radar_site))
@@ -162,10 +173,44 @@ impl RadarPaneState {
             anim_viewport_resync: false,
             anim_frame_stale: Vec::new(),
             anim_frame_inflight: Vec::new(),
+            anim_render_lock: Arc::new(Mutex::new(())),
             render_generation: 0,
-            map_cache_key: None,
+            cached_map_cache_key: None,
             cached_map_surface: None,
+            use_gpu: false,
+            wgpu_ctx: None,
+            wgpu_pipeline: None,
+            wgpu_map_geometry: None,
+            wgpu_anim: None,
+            wgpu_geo: None,
+            gl_display: None,
+            gl_blit: None,
+        };
+
+        let use_gpu = cfg.use_gpu;
+        let mut wgpu_ctx = None;
+        let mut wgpu_pipeline = None;
+        if use_gpu {
+            if let Ok(ctx) = pollster::block_on(meso_render::wgpu_render::WgpuContext::new()) {
+                let pipeline = meso_render::wgpu_render::RadarPipeline::new(
+                    &ctx,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                );
+                wgpu_ctx = Some(ctx);
+                wgpu_pipeline = Some(Arc::new(pipeline));
+            } else {
+                tracing::warn!("Failed to initialize wgpu context, falling back to Cairo");
+            }
         }
+        st.use_gpu = use_gpu;
+        st.wgpu_ctx = wgpu_ctx;
+        st.wgpu_pipeline = wgpu_pipeline;
+        if let Some(ctx) = &st.wgpu_ctx {
+            let geo = meso_render::wgpu_render::WgpuMapGeometry::new(&ctx.device, &st.map_data);
+            st.wgpu_map_geometry = Some(Arc::new(geo));
+        }
+
+        st
     }
 
     fn map_cache_key(&self) -> MapCacheKey {
@@ -189,6 +234,14 @@ impl RadarPaneState {
     /// Re-render from cached decoded data at the current viewport.
     /// Returns true if re-render succeeded.
     fn render_from_cache(&mut self) -> bool {
+        if self.use_gpu
+            && self.wgpu_ctx.is_some()
+            && self.wgpu_pipeline.is_some()
+            && self.render_from_cache_gpu()
+        {
+            return true;
+        }
+
         let map = Some(self.map_data.as_ref());
         if let Some((l2, vel)) = &self.cached_l2 {
             let code: u16 = if *vel { 99 } else { 94 };
@@ -217,10 +270,76 @@ impl RadarPaneState {
         false
     }
 
+    fn render_from_cache_gpu(&mut self) -> bool {
+        if self.wgpu_geo.is_none() {
+            let new_geo = if let Some((l2, vel)) = &self.cached_l2 {
+                let quads = meso_render::geometry::level2_to_quads(
+                    l2,
+                    *vel,
+                    self.overlays.qc_hide_no_data,
+                    self.overlays.qc_mask_weak_echoes,
+                );
+                let ctx = self.wgpu_ctx.as_ref().unwrap();
+                Some(Arc::new(meso_render::wgpu_render::WgpuRadarGeometry::new(
+                    &ctx.device,
+                    &quads,
+                )))
+            } else if let Some(l3) = &self.cached_l3 {
+                let is_vel = self.product.is_velocity();
+                let quads = meso_render::geometry::level3_to_quads(
+                    l3,
+                    is_vel,
+                    self.overlays.qc_hide_no_data,
+                    self.overlays.qc_mask_weak_echoes,
+                );
+                let ctx = self.wgpu_ctx.as_ref().unwrap();
+                Some(Arc::new(meso_render::wgpu_render::WgpuRadarGeometry::new(
+                    &ctx.device,
+                    &quads,
+                )))
+            } else {
+                None
+            };
+            self.wgpu_geo = new_geo;
+        }
+
+        let Some(geo_ref) = &self.wgpu_geo else {
+            return false;
+        };
+        let geo_arc = Arc::clone(geo_ref);
+        let palette = if let Some((_, vel)) = &self.cached_l2 {
+            let code: u16 = if *vel { 99 } else { 94 };
+            self.palette_registry.for_product(code)
+        } else if let Some(l3) = &self.cached_l3 {
+            self.palette_registry.for_product(l3.product_code)
+        } else {
+            return false;
+        };
+
+        if let (Some(ctx), Some(pipeline)) = (&self.wgpu_ctx, &self.wgpu_pipeline) {
+            let result = meso_render::wgpu_render::render_offscreen_from_geo(
+                ctx,
+                pipeline,
+                &geo_arc,
+                palette,
+                &self.viewport,
+                self.wgpu_map_geometry.as_deref(),
+                self.overlays.roads_visible,
+            );
+            if let Ok(img) = result {
+                if let Some(surf) = rgba_to_surface(&img) {
+                    self.current_surface = Some(surf);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Re-render only the map (no radar quads) for immediate viewport feedback during zoom/pan.
     fn render_map_to_pixbuf(&mut self) {
         let key = self.map_cache_key();
-        if self.map_cache_key == Some(key) {
+        if self.cached_map_cache_key == Some(key) {
             if let Some(surf) = &self.cached_map_surface {
                 self.current_surface = Some(surf.clone());
                 return;
@@ -228,7 +347,7 @@ impl RadarPaneState {
         }
         let map = Some(self.map_data.as_ref());
         if let Ok(img) = cairo_render::render_map_only(&self.viewport, &self.overlays, map) {
-            self.map_cache_key = Some(key);
+            self.cached_map_cache_key = Some(key);
             self.cached_map_surface = Some(img.clone());
             self.current_surface = Some(img);
         }
@@ -247,9 +366,22 @@ impl RadarPaneState {
         self.anim_l3_frames.clear();
         self.anim_frame_stale.clear();
         self.anim_frame_inflight.clear();
+        self.wgpu_anim = None;
+        self.wgpu_geo = None;
         self.cached_map_surface = None;
-        self.map_cache_key = None;
+        self.cached_map_cache_key = None;
     }
+}
+
+fn queue_gl_render_for_state(state: &Rc<RefCell<RadarPaneState>>) {
+    if let Some(gl) = state.borrow().gl_display.as_ref().cloned() {
+        gl.queue_render();
+    }
+}
+
+fn queue_pane_redraw(state: &Rc<RefCell<RadarPaneState>>, da: &DrawingArea) {
+    da.queue_draw();
+    queue_gl_render_for_state(state);
 }
 
 fn filtered_group_products(group: &str, site_id: &str) -> Vec<RadarProduct> {
@@ -496,9 +628,40 @@ pub fn build_radar_pane(
     right_da.set_hexpand(true);
     right_da.set_vexpand(true);
 
-    let make_overlay = |da: &DrawingArea| {
+    // Temporary stabilization: disable GL presentation until flicker is fully resolved.
+    // We still use wgpu for offscreen rendering; display is via DrawingArea only.
+    let left_use_gpu = false;
+    let right_use_gpu = false;
+    let left_gl = left_use_gpu.then(|| {
+        let gl = GLArea::new();
+        gl.set_hexpand(true);
+        gl.set_vexpand(true);
+        gl.set_auto_render(false);
+        gl.set_use_es(true); // Wayland/EGL only provides GLES contexts
+        gl.set_required_version(3, 0);
+        gl.add_css_class("radar-gl-area");
+        gl
+    });
+    let right_gl = right_use_gpu.then(|| {
+        let gl = GLArea::new();
+        gl.set_hexpand(true);
+        gl.set_vexpand(true);
+        gl.set_auto_render(false);
+        gl.set_use_es(true); // Wayland/EGL only provides GLES contexts
+        gl.set_required_version(3, 0);
+        gl.add_css_class("radar-gl-area");
+        gl
+    });
+
+    let make_overlay = |da: &DrawingArea, gl: Option<&GLArea>| {
         let overlay = Overlay::new();
-        overlay.set_child(Some(da));
+        if let Some(gl_area) = gl {
+            overlay.set_child(Some(gl_area));
+            overlay.add_overlay(da);
+            da.set_can_target(true);
+        } else {
+            overlay.set_child(Some(da));
+        }
         let zoom_box = GBox::new(Orientation::Horizontal, 2);
         zoom_box.set_halign(gtk4::Align::End);
         zoom_box.set_valign(gtk4::Align::End);
@@ -512,11 +675,153 @@ pub fn build_radar_pane(
         overlay.add_overlay(&zoom_box);
         (overlay, zoom_in_btn, zoom_out_btn)
     };
-    let (left_overlay, left_zoom_in, left_zoom_out) = make_overlay(&left_da);
-    let (right_overlay, right_zoom_in, right_zoom_out) = make_overlay(&right_da);
+    let (left_overlay, left_zoom_in, left_zoom_out) = make_overlay(&left_da, left_gl.as_ref());
+    let (right_overlay, right_zoom_in, right_zoom_out) = make_overlay(&right_da, right_gl.as_ref());
     right_overlay.set_visible(pane_count.get() == 2);
     left_overlay.add_css_class("radar-pane-active");
     right_overlay.add_css_class("radar-pane-inactive");
+
+    if let Some(ref left_gl) = left_gl {
+        let ls = Rc::clone(&left_state);
+        left_gl.connect_realize(move |gl| {
+            gl.make_current();
+            match unsafe { crate::gl_blit::GlBlitContext::new() } {
+                Ok(ctx) => ls.borrow_mut().gl_blit = Some(ctx),
+                Err(e) => tracing::error!("GlBlitContext::new: {e}"),
+            }
+        });
+        let ls = Rc::clone(&left_state);
+        left_gl.connect_unrealize(move |gl| {
+            gl.make_current();
+            let mut st = ls.borrow_mut();
+            st.gl_blit = None;
+            st.gl_display = None;
+        });
+        {
+            let ls = Rc::clone(&left_state);
+            left_gl.connect_render(move |_gl, _| {
+                let mut st = ls.borrow_mut();
+                let (img_w, img_h, vp_w, vp_h, dx, dy, zoom, zcx, zcy) =
+                    match st.current_surface.as_ref() {
+                        Some(surf) => (
+                            surf.width() as u32,
+                            surf.height() as u32,
+                            st.viewport.width as i32,
+                            st.viewport.height as i32,
+                            st.drag_offset_x,
+                            st.drag_offset_y,
+                            st.active_zoom,
+                            st.zoom_center.0,
+                            st.zoom_center.1,
+                        ),
+                        None => return glib::Propagation::Proceed,
+                    };
+                let Some(blit) = st.gl_blit.take() else {
+                    return glib::Propagation::Proceed;
+                };
+                let Some(surface) = st.current_surface.as_mut() else {
+                    st.gl_blit = Some(blit);
+                    return glib::Propagation::Proceed;
+                };
+                let Ok(data) = surface.data() else {
+                    st.gl_blit = Some(blit);
+                    return glib::Propagation::Proceed;
+                };
+                unsafe {
+                    blit.blit(&data, img_w, img_h, vp_w, vp_h, dx, dy, zoom, zcx, zcy);
+                }
+                drop(data);
+                st.gl_blit = Some(blit);
+                glib::Propagation::Stop
+            });
+        }
+        {
+            let ls = Rc::clone(&left_state);
+            let left_da_r = left_da.clone();
+            left_gl.connect_resize(move |gl, w, h| {
+                {
+                    let mut st = ls.borrow_mut();
+                    st.viewport.width = w as u32;
+                    st.viewport.height = h as u32;
+                    st.render_from_cache();
+                }
+                left_da_r.queue_draw();
+                gl.queue_render();
+            });
+        }
+        left_state.borrow_mut().gl_display = Some(left_gl.clone());
+    }
+
+    if let Some(ref right_gl) = right_gl {
+        let rs = Rc::clone(&right_state);
+        right_gl.connect_realize(move |gl| {
+            gl.make_current();
+            match unsafe { crate::gl_blit::GlBlitContext::new() } {
+                Ok(ctx) => rs.borrow_mut().gl_blit = Some(ctx),
+                Err(e) => tracing::error!("GlBlitContext::new: {e}"),
+            }
+        });
+        let rs = Rc::clone(&right_state);
+        right_gl.connect_unrealize(move |gl| {
+            gl.make_current();
+            let mut st = rs.borrow_mut();
+            st.gl_blit = None;
+            st.gl_display = None;
+        });
+        {
+            let rs = Rc::clone(&right_state);
+            right_gl.connect_render(move |_gl, _| {
+                let mut st = rs.borrow_mut();
+                let (img_w, img_h, vp_w, vp_h, dx, dy, zoom, zcx, zcy) =
+                    match st.current_surface.as_ref() {
+                        Some(surf) => (
+                            surf.width() as u32,
+                            surf.height() as u32,
+                            st.viewport.width as i32,
+                            st.viewport.height as i32,
+                            st.drag_offset_x,
+                            st.drag_offset_y,
+                            st.active_zoom,
+                            st.zoom_center.0,
+                            st.zoom_center.1,
+                        ),
+                        None => return glib::Propagation::Proceed,
+                    };
+                let Some(blit) = st.gl_blit.take() else {
+                    return glib::Propagation::Proceed;
+                };
+                let Some(surface) = st.current_surface.as_mut() else {
+                    st.gl_blit = Some(blit);
+                    return glib::Propagation::Proceed;
+                };
+                let Ok(data) = surface.data() else {
+                    st.gl_blit = Some(blit);
+                    return glib::Propagation::Proceed;
+                };
+                unsafe {
+                    blit.blit(&data, img_w, img_h, vp_w, vp_h, dx, dy, zoom, zcx, zcy);
+                }
+                drop(data);
+                st.gl_blit = Some(blit);
+                glib::Propagation::Stop
+            });
+        }
+        {
+            let rs = Rc::clone(&right_state);
+            let right_da_r = right_da.clone();
+            right_gl.connect_resize(move |gl, w, h| {
+                {
+                    let mut st = rs.borrow_mut();
+                    st.viewport.width = w as u32;
+                    st.viewport.height = h as u32;
+                    st.render_from_cache();
+                }
+                right_da_r.queue_draw();
+                gl.queue_render();
+            });
+        }
+        right_state.borrow_mut().gl_display = Some(right_gl.clone());
+    }
 
     let set_active_ui: Rc<dyn Fn(u8)> = {
         let active_slot = Rc::clone(&active_slot);
@@ -819,8 +1124,8 @@ pub fn build_radar_pane(
                 refresh_warnings(Rc::clone(&right_state), right_da.clone(), Rc::clone(&cfg));
                 refresh_storm_tracks(Rc::clone(&right_state), right_da.clone(), Rc::clone(&cfg));
             }
-            left_da.queue_draw();
-            right_da.queue_draw();
+            queue_pane_redraw(&left_state, &left_da);
+            queue_pane_redraw(&right_state, &right_da);
         })
     };
 
@@ -881,8 +1186,8 @@ pub fn build_radar_pane(
                 cfg.radar_center_lat = l.viewport.center.lat;
                 cfg.radar_center_lon = l.viewport.center.lon;
             }
-            left_da.queue_draw();
-            right_da.queue_draw();
+            queue_pane_redraw(&left_state, &left_da);
+            queue_pane_redraw(&right_state, &right_da);
             if has_anim {
                 {
                     let mut l = left_state.borrow_mut();
@@ -927,6 +1232,9 @@ pub fn build_radar_pane(
         let left_state = Rc::clone(&left_state);
         left_da.connect_resize(move |_, w, h| {
             let mut l = left_state.borrow_mut();
+            if l.gl_display.is_some() {
+                return;
+            }
             if l.viewport.width != w as u32 || l.viewport.height != h as u32 {
                 l.viewport.width = w as u32;
                 l.viewport.height = h as u32;
@@ -938,6 +1246,9 @@ pub fn build_radar_pane(
         let right_state = Rc::clone(&right_state);
         right_da.connect_resize(move |_, w, h| {
             let mut r = right_state.borrow_mut();
+            if r.gl_display.is_some() {
+                return;
+            }
             if r.viewport.width != w as u32 || r.viewport.height != h as u32 {
                 r.viewport.width = w as u32;
                 r.viewport.height = h as u32;
@@ -1001,8 +1312,8 @@ pub fn build_radar_pane(
                         r.active_zoom = factor;
                         r.zoom_center = center;
                     }
-                    l_da.queue_draw();
-                    r_da.queue_draw();
+                    queue_pane_redraw(&l_state, &l_da);
+                    queue_pane_redraw(&r_state, &r_da);
 
                     if let Some(id) = zoom_commit.borrow_mut().take() {
                         id.remove();
@@ -1056,8 +1367,8 @@ pub fn build_radar_pane(
                         r.drag_offset_x = dx;
                         r.drag_offset_y = dy;
                     }
-                    l_da.queue_draw();
-                    r_da.queue_draw();
+                    queue_pane_redraw(&l_state, &l_da);
+                    queue_pane_redraw(&r_state, &r_da);
                 });
             }
             {
@@ -1442,8 +1753,8 @@ pub fn build_radar_pane(
                     Rc::clone(&cfg_c),
                 );
             }
-            left_da_c.queue_draw();
-            right_da_c.queue_draw();
+            queue_pane_redraw(&left_state_c, &left_da_c);
+            queue_pane_redraw(&right_state_c, &right_da_c);
         });
     }
 
@@ -1832,23 +2143,32 @@ pub fn build_radar_pane(
                         let st = state_ref.borrow();
                         let code: u16 = if velocity { 99 } else { 94 };
                         let palette = st.palette_registry.for_product(code);
-                        cairo_render::render_level2(
+                        render_level2_helper(
+                            GpuRenderCtx {
+                                use_gpu: st.use_gpu,
+                                wgpu_ctx: &st.wgpu_ctx,
+                                wgpu_pipeline: &st.wgpu_pipeline,
+                                wgpu_map_geo: &st.wgpu_map_geometry,
+                            },
                             &l2,
-                            palette,
-                            &st.viewport,
-                            &st.overlays,
-                            velocity,
-                            Some(st.map_data.as_ref()),
+                            RadarRenderInputs {
+                                palette,
+                                viewport: &st.viewport,
+                                overlays: &st.overlays,
+                                is_velocity: velocity,
+                                map: st.map_data.as_ref(),
+                            },
                         )
                     };
                     match img {
                         Ok(img) => {
                             let mut st = state_ref.borrow_mut();
                             st.cached_l2 = Some((l2.clone(), velocity));
+                            st.wgpu_geo = None;
                             st.timestamp_str = Some(l2.timestamp_str());
                             st.current_surface = Some(img);
                             drop(st);
-                            da_ref.queue_draw();
+                            queue_pane_redraw(&state_ref, &da_ref);
                         }
                         Err(e) => status_tc.set_text(&format!("Render error: {e}")),
                     }
@@ -1885,6 +2205,7 @@ pub fn build_radar_pane(
                         st.overlays.roads_visible = cfg.radar_show_major_roads;
                         st.overlays.qc_hide_no_data = cfg.radar_qc_hide_no_data;
                         st.overlays.qc_mask_weak_echoes = cfg.radar_qc_mask_weak_echoes;
+                        st.wgpu_geo = None;
                         st.palette_ref = ref_name.clone();
                         st.palette_vel = vel_name.clone();
                         st.palette_registry = PaletteRegistry::with_names(&ref_name, &vel_name);
@@ -1899,6 +2220,7 @@ pub fn build_radar_pane(
                         st.overlays.roads_visible = cfg.radar_show_major_roads;
                         st.overlays.qc_hide_no_data = cfg.radar_qc_hide_no_data;
                         st.overlays.qc_mask_weak_echoes = cfg.radar_qc_mask_weak_echoes;
+                        st.wgpu_geo = None;
                         st.palette_ref = ref_name.clone();
                         st.palette_vel = vel_name.clone();
                         st.palette_registry = PaletteRegistry::with_names(&ref_name, &vel_name);
@@ -1908,13 +2230,13 @@ pub fn build_radar_pane(
                         re_render_all_anim_frames_idle(Rc::clone(&left_state2), left_da2.clone());
                     } else {
                         left_state2.borrow_mut().render_from_cache();
-                        left_da2.queue_draw();
+                        queue_pane_redraw(&left_state2, &left_da2);
                     }
                     if right_has_anim {
                         re_render_all_anim_frames_idle(Rc::clone(&right_state2), right_da2.clone());
                     } else {
                         right_state2.borrow_mut().render_from_cache();
-                        right_da2.queue_draw();
+                        queue_pane_redraw(&right_state2, &right_da2);
                     }
                 });
             }
@@ -2029,8 +2351,8 @@ pub fn build_radar_pane(
                                 return;
                             }
                             let n = min_frames_c.get();
-                            for (st, draw) in &states_done {
-                                let mut st = st.borrow_mut();
+                            for (st_ref, draw) in &states_done {
+                                let mut st = st_ref.borrow_mut();
                                 st.anim_surfaces.truncate(n);
                                 st.anim_frame_stale.truncate(n);
                                 st.anim_frame_inflight.truncate(n);
@@ -2040,7 +2362,8 @@ pub fn build_radar_pane(
                                 st.anim_index = 0;
                                 st.current_surface = st.anim_surfaces.first().cloned();
                                 st.timestamp_str = st.anim_timestamps.first().cloned();
-                                draw.queue_draw();
+                                drop(st);
+                                queue_pane_redraw(st_ref, draw);
                             }
                             shared_index_done.set(0);
                             su_done.set(true);
@@ -2093,20 +2416,50 @@ pub fn build_radar_pane(
                 let mut st = left_state_tl.borrow_mut();
                 if idx < st.anim_surfaces.len() {
                     st.anim_index = idx;
-                    st.current_surface = Some(st.anim_surfaces[idx].clone());
-                    st.timestamp_str = st.anim_timestamps.get(idx).cloned();
+                    if !st.anim_frame_stale.get(idx).copied().unwrap_or(false) {
+                        st.current_surface = Some(st.anim_surfaces[idx].clone());
+                        st.timestamp_str = st.anim_timestamps.get(idx).cloned();
+                    }
                 }
             }
-            left_da_tl.queue_draw();
+            queue_pane_redraw(&left_state_tl, &left_da_tl);
+            {
+                let st = left_state_tl.borrow();
+                if idx < st.anim_surfaces.len()
+                    && st.anim_frame_stale.get(idx).copied().unwrap_or(false)
+                {
+                    drop(st);
+                    request_anim_frame_rerender_async(
+                        Rc::clone(&left_state_tl),
+                        left_da_tl.clone(),
+                        idx,
+                    );
+                }
+            }
             if pane_count_tl.get() == 2 {
                 let mut st = right_state_tl.borrow_mut();
                 if idx < st.anim_surfaces.len() {
                     st.anim_index = idx;
-                    st.current_surface = Some(st.anim_surfaces[idx].clone());
-                    st.timestamp_str = st.anim_timestamps.get(idx).cloned();
+                    if !st.anim_frame_stale.get(idx).copied().unwrap_or(false) {
+                        st.current_surface = Some(st.anim_surfaces[idx].clone());
+                        st.timestamp_str = st.anim_timestamps.get(idx).cloned();
+                    }
                 }
                 drop(st);
-                right_da_tl.queue_draw();
+                queue_pane_redraw(&right_state_tl, &right_da_tl);
+                {
+                    let st = right_state_tl.borrow();
+                    if idx < st.anim_surfaces.len()
+                        && st.anim_frame_stale.get(idx).copied().unwrap_or(false)
+                    {
+                        drop(st);
+                        request_anim_frame_rerender_async(
+                            Rc::clone(&right_state_tl),
+                            right_da_tl.clone(),
+                            idx,
+                        );
+                    }
+                }
             }
         });
     }
@@ -2238,7 +2591,30 @@ fn start_shared_timer(
         if frame_count == 0 {
             return glib::ControlFlow::Break;
         }
-        let idx = (shared_index.get() + 1) % frame_count;
+        let current_idx = shared_index.get().min(frame_count.saturating_sub(1));
+        let all_ready = states.iter().all(|(s, _)| {
+            let st = s.borrow();
+            st.anim_frame_stale.len() >= frame_count
+                && st.anim_frame_stale[..frame_count]
+                    .iter()
+                    .all(|stale| !*stale)
+        });
+        let next_linear = current_idx + 1;
+        let idx = if next_linear < frame_count
+            && states.iter().all(|(s, _)| {
+                let st = s.borrow();
+                st.anim_frame_stale
+                    .get(next_linear)
+                    .copied()
+                    .map(|stale| !stale)
+                    .unwrap_or(false)
+            }) {
+            next_linear
+        } else if all_ready {
+            0
+        } else {
+            return glib::ControlFlow::Continue;
+        };
         shared_index.set(idx);
         for (state, da) in &states {
             let mut st = state.borrow_mut();
@@ -2248,7 +2624,7 @@ fn start_shared_timer(
                 st.timestamp_str = st.anim_timestamps.get(idx).cloned();
             }
             drop(st);
-            da.queue_draw();
+            queue_pane_redraw(state, da);
         }
         slider_updating.set(true);
         timeline.set_value(idx as f64);
@@ -2321,13 +2697,21 @@ fn load_animation_frames<F>(
                         if let Ok(l2) = level2::decode(&decompressed, vel, tilt_idx) {
                             let code: u16 = if vel { 99 } else { 94 };
                             let palette = st.palette_registry.for_product(code);
-                            if let Ok(img) = cairo_render::render_level2(
+                            if let Ok(img) = render_level2_helper(
+                                GpuRenderCtx {
+                                    use_gpu: st.use_gpu,
+                                    wgpu_ctx: &st.wgpu_ctx,
+                                    wgpu_pipeline: &st.wgpu_pipeline,
+                                    wgpu_map_geo: &st.wgpu_map_geometry,
+                                },
                                 &l2,
-                                palette,
-                                &st.viewport,
-                                &st.overlays,
-                                vel,
-                                Some(st.map_data.as_ref()),
+                                RadarRenderInputs {
+                                    palette,
+                                    viewport: &st.viewport,
+                                    overlays: &st.overlays,
+                                    is_velocity: vel,
+                                    map: st.map_data.as_ref(),
+                                },
                             ) {
                                 timestamps.push(l2.timestamp_str());
                                 surfaces.push(img);
@@ -2351,7 +2735,7 @@ fn load_animation_frames<F>(
                         st.current_surface = st.anim_surfaces.first().cloned();
                         st.timestamp_str = st.anim_timestamps.first().cloned();
                     }
-                    drawing_area.queue_draw();
+                    queue_pane_redraw(&state, &drawing_area);
                     let n = state.borrow().anim_surfaces.len();
                     on_done(Ok(n));
                 }
@@ -2401,13 +2785,21 @@ fn load_animation_frames<F>(
                         let is_vel = st.product.is_velocity();
                         if let Ok(l3) = level3::decode(&raw) {
                             let palette = st.palette_registry.for_product(l3.product_code);
-                            if let Ok(img) = cairo_render::render_level3(
+                            if let Ok(img) = render_level3_helper(
+                                GpuRenderCtx {
+                                    use_gpu: st.use_gpu,
+                                    wgpu_ctx: &st.wgpu_ctx,
+                                    wgpu_pipeline: &st.wgpu_pipeline,
+                                    wgpu_map_geo: &st.wgpu_map_geometry,
+                                },
                                 &l3,
-                                palette,
-                                &st.viewport,
-                                &st.overlays,
-                                is_vel,
-                                Some(st.map_data.as_ref()),
+                                RadarRenderInputs {
+                                    palette,
+                                    viewport: &st.viewport,
+                                    overlays: &st.overlays,
+                                    is_velocity: is_vel,
+                                    map: st.map_data.as_ref(),
+                                },
                             ) {
                                 timestamps.push(l3.timestamp_str());
                                 surfaces.push(img);
@@ -2431,7 +2823,7 @@ fn load_animation_frames<F>(
                         st.current_surface = st.anim_surfaces.first().cloned();
                         st.timestamp_str = st.anim_timestamps.first().cloned();
                     }
-                    drawing_area.queue_draw();
+                    queue_pane_redraw(&state, &drawing_area);
                     let n = state.borrow().anim_surfaces.len();
                     on_done(Ok(n));
                 }
@@ -2632,13 +3024,21 @@ fn render_l2_frames_async(
             level2::decode(first, vel, tilt_idx).ok().and_then(|l2| {
                 let code: u16 = if vel { 99 } else { 94 };
                 let palette = st.palette_registry.for_product(code);
-                cairo_render::render_level2(
+                render_level2_helper(
+                    GpuRenderCtx {
+                        use_gpu: st.use_gpu,
+                        wgpu_ctx: &st.wgpu_ctx,
+                        wgpu_pipeline: &st.wgpu_pipeline,
+                        wgpu_map_geo: &st.wgpu_map_geometry,
+                    },
                     &l2,
-                    palette,
-                    &st.viewport,
-                    &st.overlays,
-                    vel,
-                    Some(st.map_data.as_ref()),
+                    RadarRenderInputs {
+                        palette,
+                        viewport: &st.viewport,
+                        overlays: &st.overlays,
+                        is_velocity: vel,
+                        map: st.map_data.as_ref(),
+                    },
                 )
                 .ok()
                 .map(|surf| (l2.timestamp_str(), surf))
@@ -2649,7 +3049,7 @@ fn render_l2_frames_async(
             st.current_surface = Some(surf);
             st.timestamp_str = Some(ts);
             drop(st);
-            drawing_area.queue_draw();
+            queue_pane_redraw(&state, &drawing_area);
             status.set_text(&format!("Rendering 1/{total}..."));
         }
     }
@@ -2705,6 +3105,27 @@ fn render_l2_frames_async(
                 st.anim_timestamps = timestamps;
                 st.anim_l2_frames = l2_frames;
                 st.anim_l3_frames.clear();
+                // Build combined GPU animation buffer if wgpu is enabled.
+                if st.use_gpu {
+                    if let Some(ctx) = &st.wgpu_ctx {
+                        let frame_quads: Vec<_> = decoded_frames
+                            .iter()
+                            .map(|l2| {
+                                meso_render::geometry::level2_to_quads(
+                                    l2,
+                                    vel,
+                                    st.overlays.qc_hide_no_data,
+                                    st.overlays.qc_mask_weak_echoes,
+                                )
+                            })
+                            .collect();
+                        st.wgpu_anim =
+                            Some(Arc::new(meso_render::wgpu_render::WgpuRadarAnimation::new(
+                                &ctx.device,
+                                &frame_quads,
+                            )));
+                    }
+                }
                 // Frame 0 already has the preview; mark the rest stale so they render on-demand.
                 st.anim_frame_stale = vec![true; n];
                 st.anim_frame_stale[0] = false;
@@ -2714,7 +3135,7 @@ fn render_l2_frames_async(
                 st.timestamp_str = st.anim_timestamps.first().cloned();
             }
 
-            drawing_area.queue_draw();
+            queue_pane_redraw(&state, &drawing_area);
             start_timer(
                 Rc::clone(&state),
                 drawing_area.clone(),
@@ -2762,13 +3183,21 @@ fn render_l3_frames_async(
             let is_vel = st.product.is_velocity();
             level3::decode(first).ok().and_then(|l3| {
                 let palette = st.palette_registry.for_product(l3.product_code);
-                cairo_render::render_level3(
+                render_level3_helper(
+                    GpuRenderCtx {
+                        use_gpu: st.use_gpu,
+                        wgpu_ctx: &st.wgpu_ctx,
+                        wgpu_pipeline: &st.wgpu_pipeline,
+                        wgpu_map_geo: &st.wgpu_map_geometry,
+                    },
                     &l3,
-                    palette,
-                    &st.viewport,
-                    &st.overlays,
-                    is_vel,
-                    Some(st.map_data.as_ref()),
+                    RadarRenderInputs {
+                        palette,
+                        viewport: &st.viewport,
+                        overlays: &st.overlays,
+                        is_velocity: is_vel,
+                        map: st.map_data.as_ref(),
+                    },
                 )
                 .ok()
                 .map(|surf| (l3.timestamp_str(), surf))
@@ -2779,7 +3208,7 @@ fn render_l3_frames_async(
             st.current_surface = Some(surf);
             st.timestamp_str = Some(ts);
             drop(st);
-            drawing_area.queue_draw();
+            queue_pane_redraw(&state, &drawing_area);
             status.set_text(&format!("Rendering 1/{total}..."));
         }
     }
@@ -2833,6 +3262,28 @@ fn render_l3_frames_async(
                 st.anim_timestamps = timestamps;
                 st.anim_l3_frames = l3_frames;
                 st.anim_l2_frames.clear();
+                // Build combined GPU animation buffer if wgpu is enabled.
+                if st.use_gpu {
+                    if let Some(ctx) = &st.wgpu_ctx {
+                        let is_vel = st.product.is_velocity();
+                        let frame_quads: Vec<_> = decoded_frames
+                            .iter()
+                            .map(|l3| {
+                                meso_render::geometry::level3_to_quads(
+                                    l3,
+                                    is_vel,
+                                    st.overlays.qc_hide_no_data,
+                                    st.overlays.qc_mask_weak_echoes,
+                                )
+                            })
+                            .collect();
+                        st.wgpu_anim =
+                            Some(Arc::new(meso_render::wgpu_render::WgpuRadarAnimation::new(
+                                &ctx.device,
+                                &frame_quads,
+                            )));
+                    }
+                }
                 // Frame 0 already has the preview; mark the rest stale so they render on-demand.
                 st.anim_frame_stale = vec![true; n];
                 st.anim_frame_stale[0] = false;
@@ -2842,7 +3293,7 @@ fn render_l3_frames_async(
                 st.timestamp_str = st.anim_timestamps.first().cloned();
             }
 
-            drawing_area.queue_draw();
+            queue_pane_redraw(&state, &drawing_area);
             start_timer(
                 Rc::clone(&state),
                 drawing_area.clone(),
@@ -2889,19 +3340,25 @@ fn start_timer(
         if st.anim_viewport_resync {
             return glib::ControlFlow::Continue;
         }
-        // Only advance to frames that are fully rendered; skip stale placeholders so the
-        // loop stays within the already-rendered subset while the rest fill in concurrently.
+        // Advance in strict index order to avoid jumping across out-of-order completed frames.
+        // This prevents visible 0<->last flicker while background renders finish.
         let len = st.anim_surfaces.len();
-        let mut next_idx = None;
-        for offset in 1..len {
-            let i = (st.anim_index + offset) % len;
-            if !st.anim_frame_stale.get(i).copied().unwrap_or(true) {
-                next_idx = Some(i);
-                break;
-            }
-        }
-        let Some(next_idx) = next_idx else {
-            // Still on the only rendered frame; wait for more renders to complete.
+        let current_idx = st.anim_index.min(len.saturating_sub(1));
+        let next_linear = current_idx + 1;
+        let all_ready = st.anim_frame_stale.len() >= len
+            && st.anim_frame_stale[..len].iter().all(|is_stale| !*is_stale);
+        let next_idx = if next_linear < len
+            && st
+                .anim_frame_stale
+                .get(next_linear)
+                .copied()
+                .map(|is_stale| !is_stale)
+                .unwrap_or(false)
+        {
+            next_linear
+        } else if all_ready {
+            0
+        } else {
             return glib::ControlFlow::Continue;
         };
         st.anim_index = next_idx;
@@ -2912,7 +3369,7 @@ fn start_timer(
         slider_updating.set(true);
         timeline.set_value(next_idx as f64);
         slider_updating.set(false);
-        drawing_area.queue_draw();
+        queue_pane_redraw(&state, &drawing_area);
         glib::ControlFlow::Continue
     });
     *timer.borrow_mut() = Some(id);
@@ -2927,6 +3384,13 @@ enum FrameRenderJob {
         map: Arc<MapData>,
         palette_ref: String,
         palette_vel: String,
+        use_gpu: bool,
+        wgpu_ctx: Option<meso_render::wgpu_render::WgpuContext>,
+        wgpu_pipeline: Option<Arc<meso_render::wgpu_render::RadarPipeline>>,
+        wgpu_map_geo: Option<Arc<meso_render::wgpu_render::WgpuMapGeometry>>,
+        wgpu_anim: Option<Arc<meso_render::wgpu_render::WgpuRadarAnimation>>,
+        anim_render_lock: Arc<Mutex<()>>,
+        frame_idx: usize,
     },
     L3 {
         frame: Level3Data,
@@ -2936,6 +3400,13 @@ enum FrameRenderJob {
         map: Arc<MapData>,
         palette_ref: String,
         palette_vel: String,
+        use_gpu: bool,
+        wgpu_ctx: Option<meso_render::wgpu_render::WgpuContext>,
+        wgpu_pipeline: Option<Arc<meso_render::wgpu_render::RadarPipeline>>,
+        wgpu_map_geo: Option<Arc<meso_render::wgpu_render::WgpuMapGeometry>>,
+        wgpu_anim: Option<Arc<meso_render::wgpu_render::WgpuRadarAnimation>>,
+        anim_render_lock: Arc<Mutex<()>>,
+        frame_idx: usize,
     },
 }
 
@@ -2949,7 +3420,10 @@ fn request_anim_frame_rerender_async(
         if idx >= st.anim_surfaces.len() || idx >= st.anim_frame_stale.len() {
             return;
         }
-        if !st.anim_frame_stale[idx] || st.anim_frame_inflight.get(idx).copied().unwrap_or(false) {
+        if !st.anim_frame_stale[idx] {
+            return;
+        }
+        if st.anim_frame_inflight.get(idx).copied().unwrap_or(false) {
             return;
         }
         st.anim_frame_inflight[idx] = true;
@@ -2963,6 +3437,13 @@ fn request_anim_frame_rerender_async(
                     map: Arc::clone(&st.map_data),
                     palette_ref: st.palette_ref.clone(),
                     palette_vel: st.palette_vel.clone(),
+                    use_gpu: st.use_gpu,
+                    wgpu_ctx: st.wgpu_ctx.clone(),
+                    wgpu_pipeline: st.wgpu_pipeline.clone(),
+                    wgpu_map_geo: st.wgpu_map_geometry.clone(),
+                    wgpu_anim: st.wgpu_anim.clone(),
+                    anim_render_lock: Arc::clone(&st.anim_render_lock),
+                    frame_idx: idx,
                 }),
                 st.render_generation,
             )
@@ -2976,6 +3457,13 @@ fn request_anim_frame_rerender_async(
                     map: Arc::clone(&st.map_data),
                     palette_ref: st.palette_ref.clone(),
                     palette_vel: st.palette_vel.clone(),
+                    use_gpu: st.use_gpu,
+                    wgpu_ctx: st.wgpu_ctx.clone(),
+                    wgpu_pipeline: st.wgpu_pipeline.clone(),
+                    wgpu_map_geo: st.wgpu_map_geometry.clone(),
+                    wgpu_anim: st.wgpu_anim.clone(),
+                    anim_render_lock: Arc::clone(&st.anim_render_lock),
+                    frame_idx: idx,
                 }),
                 st.render_generation,
             )
@@ -2996,17 +3484,51 @@ fn request_anim_frame_rerender_async(
                     map,
                     palette_ref,
                     palette_vel,
+                    use_gpu,
+                    wgpu_ctx,
+                    wgpu_pipeline,
+                    wgpu_map_geo,
+                    wgpu_anim,
+                    anim_render_lock,
+                    frame_idx,
                 } => {
                     let reg = PaletteRegistry::with_names(&palette_ref, &palette_vel);
                     let code: u16 = if vel { 99 } else { 94 };
                     let palette = reg.for_product(code);
-                    cairo_render::render_level2_rgba(
+                    if use_gpu {
+                        let _render_guard = anim_render_lock.lock().ok();
+                        if let (Some(ctx), Some(pipeline), Some(anim)) =
+                            (&wgpu_ctx, &wgpu_pipeline, &wgpu_anim)
+                        {
+                            return meso_render::wgpu_render::render_offscreen_frame(
+                                ctx,
+                                pipeline,
+                                anim,
+                                frame_idx,
+                                palette,
+                                &viewport,
+                                meso_render::wgpu_render::OffscreenMapOverlay {
+                                    map_geo: wgpu_map_geo.as_deref(),
+                                    show_roads: overlays.roads_visible,
+                                },
+                            );
+                        }
+                    }
+                    render_level2_rgba_helper(
+                        GpuRenderCtx {
+                            use_gpu,
+                            wgpu_ctx: &wgpu_ctx,
+                            wgpu_pipeline: &wgpu_pipeline,
+                            wgpu_map_geo: &wgpu_map_geo,
+                        },
                         &frame,
-                        palette,
-                        &viewport,
-                        &overlays,
-                        vel,
-                        Some(map.as_ref()),
+                        RadarRenderInputs {
+                            palette,
+                            viewport: &viewport,
+                            overlays: &overlays,
+                            is_velocity: vel,
+                            map: map.as_ref(),
+                        },
                     )
                 }
                 FrameRenderJob::L3 {
@@ -3017,16 +3539,50 @@ fn request_anim_frame_rerender_async(
                     map,
                     palette_ref,
                     palette_vel,
+                    use_gpu,
+                    wgpu_ctx,
+                    wgpu_pipeline,
+                    wgpu_map_geo,
+                    wgpu_anim,
+                    anim_render_lock,
+                    frame_idx,
                 } => {
                     let reg = PaletteRegistry::with_names(&palette_ref, &palette_vel);
                     let palette = reg.for_product(frame.product_code);
-                    cairo_render::render_level3_rgba(
+                    if use_gpu {
+                        let _render_guard = anim_render_lock.lock().ok();
+                        if let (Some(ctx), Some(pipeline), Some(anim)) =
+                            (&wgpu_ctx, &wgpu_pipeline, &wgpu_anim)
+                        {
+                            return meso_render::wgpu_render::render_offscreen_frame(
+                                ctx,
+                                pipeline,
+                                anim,
+                                frame_idx,
+                                palette,
+                                &viewport,
+                                meso_render::wgpu_render::OffscreenMapOverlay {
+                                    map_geo: wgpu_map_geo.as_deref(),
+                                    show_roads: overlays.roads_visible,
+                                },
+                            );
+                        }
+                    }
+                    render_level3_rgba_helper(
+                        GpuRenderCtx {
+                            use_gpu,
+                            wgpu_ctx: &wgpu_ctx,
+                            wgpu_pipeline: &wgpu_pipeline,
+                            wgpu_map_geo: &wgpu_map_geo,
+                        },
                         &frame,
-                        palette,
-                        &viewport,
-                        &overlays,
-                        is_vel,
-                        Some(map.as_ref()),
+                        RadarRenderInputs {
+                            palette,
+                            viewport: &viewport,
+                            overlays: &overlays,
+                            is_velocity: is_vel,
+                            map: map.as_ref(),
+                        },
                     )
                 }
             }
@@ -3037,8 +3593,14 @@ fn request_anim_frame_rerender_async(
                 st.anim_frame_inflight[idx] = false;
             }
             if st.render_generation != generation {
+                let should_retry = idx < st.anim_surfaces.len()
+                    && st.anim_frame_stale.get(idx).copied().unwrap_or(false)
+                    && !st.anim_frame_inflight.get(idx).copied().unwrap_or(false);
                 drop(st);
-                drawing_area.queue_draw();
+                if should_retry {
+                    request_anim_frame_rerender_async(Rc::clone(&state), drawing_area.clone(), idx);
+                }
+                queue_pane_redraw(&state, &drawing_area);
                 return;
             }
 
@@ -3062,7 +3624,7 @@ fn request_anim_frame_rerender_async(
             }
 
             drop(st);
-            drawing_area.queue_draw();
+            queue_pane_redraw(&state, &drawing_area);
         },
     );
 }
@@ -3142,31 +3704,45 @@ fn load_level3(
                         let (palette_kind, img) = {
                             let st = state.borrow();
                             let palette = st.palette_registry.for_product(l3.product_code);
-                            let img = cairo_render::render_level3(
+                            let img = render_level3_helper(
+                                GpuRenderCtx {
+                                    use_gpu: st.use_gpu,
+                                    wgpu_ctx: &st.wgpu_ctx,
+                                    wgpu_pipeline: &st.wgpu_pipeline,
+                                    wgpu_map_geo: &st.wgpu_map_geometry,
+                                },
                                 &l3,
-                                palette,
-                                &st.viewport,
-                                &st.overlays,
-                                is_vel,
-                                Some(st.map_data.as_ref()),
+                                RadarRenderInputs {
+                                    palette,
+                                    viewport: &st.viewport,
+                                    overlays: &st.overlays,
+                                    is_velocity: is_vel,
+                                    map: st.map_data.as_ref(),
+                                },
                             );
                             (l3.product_code, img)
                         };
                         let _ = palette_kind;
-                        state.borrow_mut().cached_l3 = Some(l3.clone());
+                        {
+                            let mut st = state.borrow_mut();
+                            st.cached_l3 = Some(l3.clone());
+                            st.wgpu_geo = None;
+                        }
                         match img {
                             Ok(img) => {
-                                let mut st = state.borrow_mut();
-                                st.timestamp_str = Some(l3.timestamp_str());
-                                st.current_surface = Some(img);
-                                let desc = st.product.description_line();
-                                let status_text = if desc.is_empty() {
-                                    "Ready".to_string()
-                                } else {
-                                    format!("Ready — {desc}")
+                                let status_text = {
+                                    let mut st = state.borrow_mut();
+                                    st.timestamp_str = Some(l3.timestamp_str());
+                                    st.current_surface = Some(img);
+                                    let desc = st.product.description_line();
+                                    if desc.is_empty() {
+                                        "Ready".to_string()
+                                    } else {
+                                        format!("Ready — {desc}")
+                                    }
                                 };
                                 status.set_text(&status_text);
-                                drawing_area.queue_draw();
+                                queue_pane_redraw(&state, &drawing_area);
                             }
                             Err(e) => status.set_text(&format!("Render error: {e}")),
                         }
@@ -3226,18 +3802,27 @@ fn load_level2(
                                     let st = state.borrow();
                                     let code: u16 = if velocity { 99 } else { 94 };
                                     let palette = st.palette_registry.for_product(code);
-                                    cairo_render::render_level2(
+                                    render_level2_helper(
+                                        GpuRenderCtx {
+                                            use_gpu: st.use_gpu,
+                                            wgpu_ctx: &st.wgpu_ctx,
+                                            wgpu_pipeline: &st.wgpu_pipeline,
+                                            wgpu_map_geo: &st.wgpu_map_geometry,
+                                        },
                                         &l2,
-                                        palette,
-                                        &st.viewport,
-                                        &st.overlays,
-                                        velocity,
-                                        Some(st.map_data.as_ref()),
+                                        RadarRenderInputs {
+                                            palette,
+                                            viewport: &st.viewport,
+                                            overlays: &st.overlays,
+                                            is_velocity: velocity,
+                                            map: st.map_data.as_ref(),
+                                        },
                                     )
                                 };
                                 {
                                     let mut st = state.borrow_mut();
                                     st.cached_l2 = Some((l2.clone(), velocity));
+                                    st.wgpu_geo = None;
                                     st.cached_l2_bytes = Some(raw);
                                     st.l2_tilt_idx = safe_tilt;
                                     st.l2_tilts = tilts.clone();
@@ -3261,11 +3846,14 @@ fn load_level2(
                                 tilt_combo.set_visible(true);
                                 match img {
                                     Ok(img) => {
-                                        let mut st = state.borrow_mut();
-                                        st.timestamp_str = Some(l2.timestamp_str());
-                                        st.current_surface = Some(img);
+                                        {
+                                            let mut st = state.borrow_mut();
+                                            st.timestamp_str = Some(l2.timestamp_str());
+                                            st.current_surface = Some(img);
+                                            st.wgpu_geo = None;
+                                        }
                                         status.set_text("Ready");
-                                        drawing_area.queue_draw();
+                                        queue_pane_redraw(&state, &drawing_area);
                                     }
                                     Err(e) => status.set_text(&format!("Render error: {e}")),
                                 }
@@ -3314,7 +3902,7 @@ fn refresh_warnings(
                     re_render_all_anim_frames_idle(Rc::clone(&state), drawing_area.clone());
                 } else {
                     let _ = state.borrow_mut().render_from_cache();
-                    drawing_area.queue_draw();
+                    queue_pane_redraw(&state, &drawing_area);
                 }
             }
         },
@@ -3362,7 +3950,7 @@ fn refresh_storm_tracks(
                 re_render_all_anim_frames_idle(Rc::clone(&state), drawing_area.clone());
             } else {
                 let _ = state.borrow_mut().render_from_cache();
-                drawing_area.queue_draw();
+                queue_pane_redraw(&state, &drawing_area);
             }
         },
     );
@@ -3398,6 +3986,175 @@ fn rgba_to_surface(img: &meso_render::frame::RenderedImage) -> Option<ImageSurfa
     }
     drop(data);
     Some(surface)
+}
+
+// ── Render dispatch helpers ───────────────────────────────────────────────────
+
+struct GpuRenderCtx<'a> {
+    use_gpu: bool,
+    wgpu_ctx: &'a Option<meso_render::wgpu_render::WgpuContext>,
+    wgpu_pipeline: &'a Option<Arc<meso_render::wgpu_render::RadarPipeline>>,
+    wgpu_map_geo: &'a Option<Arc<meso_render::wgpu_render::WgpuMapGeometry>>,
+}
+
+struct RadarRenderInputs<'a> {
+    palette: &'a meso_data::radar::color_palette::ColorPalette,
+    viewport: &'a Viewport,
+    overlays: &'a meso_render::overlay::OverlaySet,
+    is_velocity: bool,
+    map: &'a MapData,
+}
+
+/// Render a Level 2 scan to an `ImageSurface`, routing to wgpu or Cairo.
+fn render_level2_helper(
+    gpu: GpuRenderCtx<'_>,
+    data: &Level2Data,
+    inputs: RadarRenderInputs<'_>,
+) -> anyhow::Result<ImageSurface> {
+    if gpu.use_gpu {
+        if let (Some(ctx), Some(pipeline)) = (gpu.wgpu_ctx, gpu.wgpu_pipeline) {
+            let quads = meso_render::geometry::level2_to_quads(
+                data,
+                inputs.is_velocity,
+                inputs.overlays.qc_hide_no_data,
+                inputs.overlays.qc_mask_weak_echoes,
+            );
+            let img = meso_render::wgpu_render::render_offscreen(
+                ctx,
+                pipeline,
+                &quads,
+                inputs.palette,
+                inputs.viewport,
+                gpu.wgpu_map_geo.as_deref(),
+                inputs.overlays.roads_visible,
+            )?;
+            return rgba_to_surface(&img).ok_or_else(|| {
+                anyhow::anyhow!("wgpu: failed to convert RenderedImage to surface")
+            });
+        }
+    }
+    // Fall back to Cairo
+    cairo_render::render_level2(
+        data,
+        inputs.palette,
+        inputs.viewport,
+        inputs.overlays,
+        inputs.is_velocity,
+        Some(inputs.map),
+    )
+}
+
+/// Render a Level 3 scan to an `ImageSurface`, routing to wgpu or Cairo.
+fn render_level3_helper(
+    gpu: GpuRenderCtx<'_>,
+    data: &Level3Data,
+    inputs: RadarRenderInputs<'_>,
+) -> anyhow::Result<ImageSurface> {
+    if gpu.use_gpu {
+        if let (Some(ctx), Some(pipeline)) = (gpu.wgpu_ctx, gpu.wgpu_pipeline) {
+            let quads = meso_render::geometry::level3_to_quads(
+                data,
+                inputs.is_velocity,
+                inputs.overlays.qc_hide_no_data,
+                inputs.overlays.qc_mask_weak_echoes,
+            );
+            let img = meso_render::wgpu_render::render_offscreen(
+                ctx,
+                pipeline,
+                &quads,
+                inputs.palette,
+                inputs.viewport,
+                gpu.wgpu_map_geo.as_deref(),
+                inputs.overlays.roads_visible,
+            )?;
+            return rgba_to_surface(&img).ok_or_else(|| {
+                anyhow::anyhow!("wgpu: failed to convert RenderedImage to surface")
+            });
+        }
+    }
+    // Fall back to Cairo
+    cairo_render::render_level3(
+        data,
+        inputs.palette,
+        inputs.viewport,
+        inputs.overlays,
+        inputs.is_velocity,
+        Some(inputs.map),
+    )
+}
+
+/// Render a Level 2 scan to `RenderedImage` (RGBA bytes) for cross-thread transport.
+/// Routes to wgpu or Cairo based on the use_gpu flag.
+fn render_level2_rgba_helper(
+    gpu: GpuRenderCtx<'_>,
+    data: &Level2Data,
+    inputs: RadarRenderInputs<'_>,
+) -> anyhow::Result<meso_render::frame::RenderedImage> {
+    if gpu.use_gpu {
+        if let (Some(ctx), Some(pipeline)) = (gpu.wgpu_ctx, gpu.wgpu_pipeline) {
+            let quads = meso_render::geometry::level2_to_quads(
+                data,
+                inputs.is_velocity,
+                inputs.overlays.qc_hide_no_data,
+                inputs.overlays.qc_mask_weak_echoes,
+            );
+            return meso_render::wgpu_render::render_offscreen(
+                ctx,
+                pipeline,
+                &quads,
+                inputs.palette,
+                inputs.viewport,
+                gpu.wgpu_map_geo.as_deref(),
+                inputs.overlays.roads_visible,
+            );
+        }
+    }
+    // Fall back to Cairo
+    cairo_render::render_level2_rgba(
+        data,
+        inputs.palette,
+        inputs.viewport,
+        inputs.overlays,
+        inputs.is_velocity,
+        Some(inputs.map),
+    )
+}
+
+/// Render a Level 3 scan to `RenderedImage` (RGBA bytes) for cross-thread transport.
+/// Routes to wgpu or Cairo based on the use_gpu flag.
+fn render_level3_rgba_helper(
+    gpu: GpuRenderCtx<'_>,
+    data: &Level3Data,
+    inputs: RadarRenderInputs<'_>,
+) -> anyhow::Result<meso_render::frame::RenderedImage> {
+    if gpu.use_gpu {
+        if let (Some(ctx), Some(pipeline)) = (gpu.wgpu_ctx, gpu.wgpu_pipeline) {
+            let quads = meso_render::geometry::level3_to_quads(
+                data,
+                inputs.is_velocity,
+                inputs.overlays.qc_hide_no_data,
+                inputs.overlays.qc_mask_weak_echoes,
+            );
+            return meso_render::wgpu_render::render_offscreen(
+                ctx,
+                pipeline,
+                &quads,
+                inputs.palette,
+                inputs.viewport,
+                gpu.wgpu_map_geo.as_deref(),
+                inputs.overlays.roads_visible,
+            );
+        }
+    }
+    // Fall back to Cairo
+    cairo_render::render_level3_rgba(
+        data,
+        inputs.palette,
+        inputs.viewport,
+        inputs.overlays,
+        inputs.is_velocity,
+        Some(inputs.map),
+    )
 }
 
 // ── Gate inspect helpers ──────────────────────────────────────────────────────
