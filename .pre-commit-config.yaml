@@ -3,8 +3,11 @@ repos:
     rev: v1.0
     hooks:
       - id: fmt
-        args: ["--all", "--", "--check"]
+        args: ["--all"]
+        pass_filenames: false
       - id: cargo-check
         args: ["--workspace"]
+        pass_filenames: false
       - id: clippy
         args: ["--workspace", "--all-targets", "--", "-D", "warnings"]
+        pass_filenames: false

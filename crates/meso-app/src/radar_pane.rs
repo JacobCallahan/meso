@@ -41,7 +41,7 @@ use meso_data::storm_tracks::fetch_storm_tracks;
 use meso_data::updraft::{load_subscriptions, save_subscriptions};
 use meso_render::cairo_render;
 use meso_render::overlay::{
-    build_storm_tracks_layer, build_warnings_layer, OverlayLayer, OverlaySet,
+    build_storm_tracks_layer, build_warnings_layer, warning_color, OverlayLayer, OverlaySet,
 };
 use meso_render::viewport::Viewport;
 
@@ -923,6 +923,7 @@ pub fn build_radar_pane(
                 }
                 let _ = cr.set_source_surface(pb, 0.0, 0.0);
                 let _ = cr.paint();
+                draw_warning_outlines(cr, &st);
                 draw_hovered_warning(cr, &st);
                 draw_location_markers(cr, w, h, &st.viewport, &cfg_draw.borrow());
                 draw_custom_tracks(cr, w, h, &st.viewport, &cfg_draw.borrow());
@@ -982,6 +983,7 @@ pub fn build_radar_pane(
                 }
                 let _ = cr.set_source_surface(pb, 0.0, 0.0);
                 let _ = cr.paint();
+                draw_warning_outlines(cr, &st);
                 draw_hovered_warning(cr, &st);
                 draw_location_markers(cr, w, h, &st.viewport, &cfg_draw.borrow());
                 draw_custom_tracks(cr, w, h, &st.viewport, &cfg_draw.borrow());
@@ -4196,10 +4198,9 @@ fn lookup_l2_gate(st: &RadarPaneState, range_km: f64, az: f64) -> Option<(String
     // Try current cached L2 first; fall back to first animation frame
     let (data, is_vel) = if let Some(ref l2) = st.cached_l2 {
         (&l2.0, l2.1)
-    } else if let Some(first) = st.anim_l2_frames.first() {
-        (&first.0, first.1)
     } else {
-        return None;
+        let first = st.anim_l2_frames.first()?;
+        (&first.0, first.1)
     };
 
     let bin_size = data.bin_size_km as f64;
@@ -4755,14 +4756,7 @@ fn draw_location_markers(
 }
 
 fn draw_hovered_warning(cr: &gtk4::cairo::Context, st: &RadarPaneState) {
-    let warnings_visible = st
-        .overlays
-        .layers
-        .iter()
-        .find(|l| l.name == "warnings")
-        .map(|l| l.visible)
-        .unwrap_or(false);
-    if !warnings_visible {
+    if !warnings_layer_visible(st) {
         return;
     }
     let Some(idx) = st.hovered_warning else {
@@ -4775,7 +4769,8 @@ fn draw_hovered_warning(cr: &gtk4::cairo::Context, st: &RadarPaneState) {
         return;
     }
 
-    cr.set_source_rgba(1.0, 1.0, 0.0, 0.95);
+    let (r, g, b) = warning_color(&w.event);
+    cr.set_source_rgba(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 1.0);
     cr.set_line_width(3.0);
     let mut first = true;
     for pt in &w.polygon {
@@ -4813,6 +4808,37 @@ fn draw_hovered_warning(cr: &gtk4::cairo::Context, st: &RadarPaneState) {
     cr.set_source_rgb(1.0, 1.0, 0.0);
     cr.move_to(x, y);
     let _ = cr.show_text(&text);
+}
+
+fn draw_warning_outlines(cr: &gtk4::cairo::Context, st: &RadarPaneState) {
+    if !st.use_gpu || !warnings_layer_visible(st) {
+        return;
+    }
+
+    for w in &st.warnings {
+        if !w.is_current || w.polygon.is_empty() {
+            continue;
+        }
+
+        let (r, g, b) = warning_color(&w.event);
+        cr.set_source_rgba(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0, 0.4);
+        cr.set_line_width(2.0);
+
+        let mut first = true;
+        for pt in &w.polygon {
+            let (x, y) = st.viewport.latlon_to_screen(pt);
+            if first {
+                cr.move_to(x, y);
+                first = false;
+            } else {
+                cr.line_to(x, y);
+            }
+        }
+        if !first {
+            cr.close_path();
+            let _ = cr.stroke();
+        }
+    }
 }
 
 fn marker_time_minutes(point: &RadarTrackPoint) -> Option<i64> {

@@ -5,6 +5,7 @@
  */
 
 use anyhow::{Context as AnyhowContext, Result};
+use std::mem::size_of;
 use wgpu::util::DeviceExt;
 use wgpu::*;
 
@@ -309,31 +310,178 @@ impl WgpuRadarGeometry {
 
 #[derive(Clone, Copy, Debug)]
 pub struct WgpuRadarFrameMetadata {
+    pub chunk_index: usize,
     pub index_start: u32,
     pub index_count: u32,
     pub base_vertex: i32,
 }
 
-pub struct WgpuRadarAnimation {
+pub struct WgpuRadarAnimationChunk {
     pub pos_buf: Buffer,
     pub level_buf: Buffer,
     pub index_buf: Buffer,
+}
+
+pub struct WgpuRadarAnimation {
+    pub chunks: Vec<WgpuRadarAnimationChunk>,
     pub frames: Vec<WgpuRadarFrameMetadata>,
 }
 
 impl WgpuRadarAnimation {
     pub fn new(device: &Device, frame_quads: &[QuadBuffer]) -> Self {
+        let empty_animation = || {
+            let pos_buf = device.create_buffer_init(&util::BufferInitDescriptor {
+                label: Some("anim_pos_buf_empty"),
+                contents: bytemuck::cast_slice(&[0.0_f32, 0.0_f32]),
+                usage: BufferUsages::VERTEX,
+            });
+            let level_buf = device.create_buffer_init(&util::BufferInitDescriptor {
+                label: Some("anim_level_buf_empty"),
+                contents: bytemuck::cast_slice(&[0.0_f32]),
+                usage: BufferUsages::VERTEX,
+            });
+            let index_buf = device.create_buffer_init(&util::BufferInitDescriptor {
+                label: Some("anim_idx_buf_empty"),
+                contents: bytemuck::cast_slice(&[0_u32]),
+                usage: BufferUsages::INDEX,
+            });
+            WgpuRadarAnimation {
+                chunks: vec![WgpuRadarAnimationChunk {
+                    pos_buf,
+                    level_buf,
+                    index_buf,
+                }],
+                frames: Vec::new(),
+            }
+        };
+
+        if frame_quads.is_empty() {
+            return empty_animation();
+        }
+
+        let max_buffer_size = device.limits().max_buffer_size as usize;
+        let max_vertices_per_chunk = (i32::MAX as usize).saturating_sub(1);
+        let max_indices_per_chunk = u32::MAX as usize;
+
+        let flush_chunk = |device: &Device,
+                           chunks: &mut Vec<WgpuRadarAnimationChunk>,
+                           all_positions: &mut Vec<f32>,
+                           all_levels: &mut Vec<f32>,
+                           all_indices: &mut Vec<u32>| {
+            if all_positions.is_empty() {
+                return;
+            }
+            let pos_buf = device.create_buffer_init(&util::BufferInitDescriptor {
+                label: Some("anim_pos_buf"),
+                contents: bytemuck::cast_slice(all_positions.as_slice()),
+                usage: BufferUsages::VERTEX,
+            });
+            let level_buf = device.create_buffer_init(&util::BufferInitDescriptor {
+                label: Some("anim_level_buf"),
+                contents: bytemuck::cast_slice(all_levels.as_slice()),
+                usage: BufferUsages::VERTEX,
+            });
+            let index_buf = device.create_buffer_init(&util::BufferInitDescriptor {
+                label: Some("anim_idx_buf"),
+                contents: bytemuck::cast_slice(all_indices.as_slice()),
+                usage: BufferUsages::INDEX,
+            });
+            chunks.push(WgpuRadarAnimationChunk {
+                pos_buf,
+                level_buf,
+                index_buf,
+            });
+            all_positions.clear();
+            all_levels.clear();
+            all_indices.clear();
+        };
+
         let mut all_positions = Vec::new();
         let mut all_levels = Vec::new();
         let mut all_indices = Vec::new();
+        let mut chunks = Vec::new();
         let mut frames = Vec::new();
 
-        let mut current_vertex_offset = 0i32;
+        let mut current_vertex_offset = 0usize;
         let mut current_index_offset = 0u32;
 
         for quads in frame_quads {
-            let num_quads = quads.quad_count as u32;
-            let index_count = num_quads * 6;
+            let Ok(num_quads) = u32::try_from(quads.quad_count) else {
+                tracing::warn!("radar animation frame has too many quads for u32 index math");
+                return empty_animation();
+            };
+            let Some(index_count) = num_quads.checked_mul(6) else {
+                tracing::warn!("radar animation index count overflow");
+                return empty_animation();
+            };
+            let Some(frame_vertices) = quads.quad_count.checked_mul(4) else {
+                tracing::warn!("radar animation vertex count overflow");
+                return empty_animation();
+            };
+
+            let Some(frame_pos_bytes) = quads.positions.len().checked_mul(size_of::<f32>()) else {
+                tracing::warn!("radar animation position byte size overflow");
+                return empty_animation();
+            };
+            let Some(frame_level_bytes) = quads.levels.len().checked_mul(size_of::<f32>()) else {
+                tracing::warn!("radar animation level byte size overflow");
+                return empty_animation();
+            };
+            let Some(frame_index_bytes) = (index_count as usize).checked_mul(size_of::<u32>())
+            else {
+                tracing::warn!("radar animation index byte size overflow");
+                return empty_animation();
+            };
+
+            if frame_pos_bytes > max_buffer_size
+                || frame_level_bytes > max_buffer_size
+                || frame_index_bytes > max_buffer_size
+                || frame_vertices > max_vertices_per_chunk
+            {
+                tracing::warn!("single radar animation frame exceeds device buffer limits");
+                return empty_animation();
+            }
+
+            let Some(chunk_pos_bytes) = all_positions.len().checked_mul(size_of::<f32>()) else {
+                tracing::warn!("radar animation chunk position byte size overflow");
+                return empty_animation();
+            };
+            let Some(chunk_level_bytes) = all_levels.len().checked_mul(size_of::<f32>()) else {
+                tracing::warn!("radar animation chunk level byte size overflow");
+                return empty_animation();
+            };
+            let Some(chunk_index_bytes) = all_indices.len().checked_mul(size_of::<u32>()) else {
+                tracing::warn!("radar animation chunk index byte size overflow");
+                return empty_animation();
+            };
+
+            let exceeds_device_limit = chunk_pos_bytes
+                .checked_add(frame_pos_bytes)
+                .is_none_or(|bytes| bytes > max_buffer_size)
+                || chunk_level_bytes
+                    .checked_add(frame_level_bytes)
+                    .is_none_or(|bytes| bytes > max_buffer_size)
+                || chunk_index_bytes
+                    .checked_add(frame_index_bytes)
+                    .is_none_or(|bytes| bytes > max_buffer_size);
+            let exceeds_vertex_limit = current_vertex_offset
+                .checked_add(frame_vertices)
+                .is_none_or(|count| count > max_vertices_per_chunk);
+            let exceeds_index_limit = current_index_offset
+                .checked_add(index_count)
+                .is_none_or(|count| count as usize > max_indices_per_chunk);
+
+            if exceeds_device_limit || exceeds_vertex_limit || exceeds_index_limit {
+                flush_chunk(
+                    device,
+                    &mut chunks,
+                    &mut all_positions,
+                    &mut all_levels,
+                    &mut all_indices,
+                );
+                current_vertex_offset = 0usize;
+                current_index_offset = 0;
+            }
 
             all_positions.extend_from_slice(&quads.positions);
             all_levels.extend(quads.levels.iter().map(|&l| l as f32));
@@ -347,39 +495,40 @@ impl WgpuRadarAnimation {
             all_indices.extend_from_slice(&indices);
 
             frames.push(WgpuRadarFrameMetadata {
+                chunk_index: chunks.len(),
                 index_start: current_index_offset,
                 index_count,
-                base_vertex: current_vertex_offset,
+                base_vertex: current_vertex_offset as i32,
             });
 
-            current_vertex_offset += (quads.quad_count * 4) as i32;
-            current_index_offset += index_count;
+            let Some(next_vertex_offset) = current_vertex_offset.checked_add(frame_vertices) else {
+                tracing::warn!("radar animation vertex offset overflow");
+                return empty_animation();
+            };
+            let Some(next_index_offset) = current_index_offset.checked_add(index_count) else {
+                tracing::warn!("radar animation index offset overflow");
+                return empty_animation();
+            };
+            current_vertex_offset = next_vertex_offset;
+            current_index_offset = next_index_offset;
         }
 
-        let pos_buf = device.create_buffer_init(&util::BufferInitDescriptor {
-            label: Some("anim_pos_buf"),
-            contents: bytemuck::cast_slice(&all_positions),
-            usage: BufferUsages::VERTEX,
-        });
+        flush_chunk(
+            device,
+            &mut chunks,
+            &mut all_positions,
+            &mut all_levels,
+            &mut all_indices,
+        );
 
-        let level_buf = device.create_buffer_init(&util::BufferInitDescriptor {
-            label: Some("anim_level_buf"),
-            contents: bytemuck::cast_slice(&all_levels),
-            usage: BufferUsages::VERTEX,
-        });
-
-        let index_buf = device.create_buffer_init(&util::BufferInitDescriptor {
-            label: Some("anim_idx_buf"),
-            contents: bytemuck::cast_slice(&all_indices),
-            usage: BufferUsages::INDEX,
-        });
-
-        WgpuRadarAnimation {
-            pos_buf,
-            level_buf,
-            index_buf,
-            frames,
+        if chunks.is_empty() {
+            return WgpuRadarAnimation {
+                chunks: empty_animation().chunks,
+                frames,
+            };
         }
+
+        WgpuRadarAnimation { chunks, frames }
     }
 }
 
@@ -720,6 +869,10 @@ pub fn render_offscreen_frame(
         .frames
         .get(frame_idx)
         .with_context(|| format!("animation frame index {frame_idx} out of range"))?;
+    let chunk = anim
+        .chunks
+        .get(meta.chunk_index)
+        .with_context(|| format!("animation chunk index {} out of range", meta.chunk_index))?;
 
     let w = viewport.width;
     let h = viewport.height;
@@ -759,9 +912,9 @@ pub fn render_offscreen_frame(
         });
         rpass.set_pipeline(&pipeline.pipeline);
         rpass.set_bind_group(0, &bind_group, &[]);
-        rpass.set_vertex_buffer(0, anim.pos_buf.slice(..));
-        rpass.set_vertex_buffer(1, anim.level_buf.slice(..));
-        rpass.set_index_buffer(anim.index_buf.slice(..), IndexFormat::Uint32);
+        rpass.set_vertex_buffer(0, chunk.pos_buf.slice(..));
+        rpass.set_vertex_buffer(1, chunk.level_buf.slice(..));
+        rpass.set_index_buffer(chunk.index_buf.slice(..), IndexFormat::Uint32);
         if meta.index_count > 0 {
             rpass.draw_indexed(
                 meta.index_start..meta.index_start + meta.index_count,

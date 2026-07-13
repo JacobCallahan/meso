@@ -88,11 +88,20 @@ async fn fetch_level2_partial_and_decompress_ktlx() {
         .await
         .expect("fetch Level 2 partial bytes");
     assert!(!raw.is_empty(), "raw bytes should not be empty");
+    assert!(
+        raw.len() >= 24,
+        "raw bytes should contain at least the 24-byte Level 2 header"
+    );
 
     let decompressed = level2::decompress_level2(&raw).expect("decompress Level 2 data");
     assert!(
-        decompressed.len() > raw.len(),
-        "decompressed should be larger than compressed input"
+        decompressed.len() >= 24,
+        "decompressed bytes should contain at least the 24-byte Level 2 header"
+    );
+    assert_eq!(
+        &decompressed[..24],
+        &raw[..24],
+        "decompression must preserve the Level 2 file header"
     );
 }
 

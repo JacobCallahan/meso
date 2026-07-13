@@ -1236,7 +1236,7 @@ fn load_ncep_image(
     status.set_text(&format!(
         "Loading {} {} F+{hour:03}...",
         model.label(),
-        &product_id
+        product_id
     ));
 
     // Grab cached run time (may be empty)
