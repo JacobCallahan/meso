@@ -13,44 +13,17 @@ use meso_data::storm_tracks::StormCell;
 /// RGB color for a given NWS warning event type.
 pub fn warning_color(event: &str) -> (u8, u8, u8) {
     let event_lc = event.to_lowercase();
-    if event_lc.contains("tornado warning") {
-        (255, 0, 255)
-    } else if event_lc.contains("tornado watch") {
-        (255, 255, 0)
-    } else if event_lc.contains("severe thunderstorm warning") {
-        (255, 165, 0)
-    } else if event_lc.contains("severe thunderstorm watch") {
-        (219, 112, 147)
-    } else if event_lc.contains("flash flood warning") {
-        (0, 255, 0)
-    } else if event_lc.contains("flash flood watch") {
-        (46, 139, 87)
-    } else if event_lc.contains("special marine warning") {
-        (255, 165, 0)
-    } else if event_lc.contains("blizzard warning") {
-        (255, 255, 255)
-    } else if event_lc.contains("winter storm warning") {
-        (255, 105, 180)
-    } else if event_lc.contains("winter storm watch") {
-        (70, 130, 180)
-    } else if event_lc.contains("ice storm") {
-        (139, 0, 139)
-    } else if event_lc.contains("wind advisory") {
-        (210, 180, 140)
-    } else if event_lc.contains("high wind warning") {
-        (218, 165, 32)
-    } else if event_lc.contains("dense fog") {
-        (112, 128, 144)
-    } else if event_lc.contains("heat advisory") {
-        (255, 127, 0)
-    } else if event_lc.contains("excessive heat") {
-        (200, 0, 0)
-    } else if event_lc.contains("freeze warning") || event_lc.contains("frost") {
-        (100, 149, 237)
-    } else if event_lc.contains("special weather statement") {
-        (255, 228, 181)
+    if event_lc.contains("tornado") {
+        // Indigo/violet for tornado events.
+        (148, 0, 211)
+    } else if event_lc.contains("thunderstorm") {
+        (255, 0, 0)
+    } else if event_lc.contains("flash flood") {
+        (30, 144, 255)
+    } else if event_lc.contains("wind") {
+        (0, 200, 0)
     } else {
-        (128, 128, 128)
+        (255, 255, 0)
     }
 }
 
