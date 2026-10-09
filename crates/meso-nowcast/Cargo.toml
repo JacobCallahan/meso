@@ -1,0 +1,16 @@
+[package]
+name = "meso-nowcast"
+description = "Radar nowcasting engine for Meso weather application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+meso-data = { path = "../meso-data" }
+rayon.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

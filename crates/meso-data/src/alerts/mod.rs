@@ -41,6 +41,8 @@ pub struct Warning {
     pub is_current: bool,
     /// Decoded polygon lat/lon pairs, if available
     pub polygon: Vec<LatLon>,
+    /// Precomputed bounding box: (min_lat, max_lat, min_lon, max_lon)
+    pub bbox: Option<(f64, f64, f64, f64)>,
 }
 
 impl Warning {
@@ -60,6 +62,19 @@ impl Warning {
         let expires = clean_time(&expires);
         let is_current = vtec_is_current(&vtec);
         let polygon = parse_polygon(&polygon_raw);
+        let bbox = polygon.first().map(|first| {
+            let mut min_lat = first.lat;
+            let mut max_lat = first.lat;
+            let mut min_lon = first.lon;
+            let mut max_lon = first.lon;
+            for p in polygon.iter().skip(1) {
+                min_lat = min_lat.min(p.lat);
+                max_lat = max_lat.max(p.lat);
+                min_lon = min_lon.min(p.lon);
+                max_lon = max_lon.max(p.lon);
+            }
+            (min_lat, max_lat, min_lon, max_lon)
+        });
         Warning {
             url,
             area,
@@ -72,7 +87,18 @@ impl Warning {
             vtec,
             is_current,
             polygon,
+            bbox,
         }
+    }
+
+    /// Check if the given coordinate is within the precomputed bounding box.
+    #[inline]
+    pub fn bbox_contains(&self, lat: f64, lon: f64) -> bool {
+        self.bbox
+            .map(|(min_lat, max_lat, min_lon, max_lon)| {
+                lat >= min_lat && lat <= max_lat && lon >= min_lon && lon <= max_lon
+            })
+            .unwrap_or(false)
     }
 
     /// Return the closest NEXRAD radar site to the warning polygon centroid.

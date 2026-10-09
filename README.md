@@ -234,7 +234,7 @@ All data is fetched live from NOAA/NWS public servers; no API key is required.
 
 | Data                | Source                                            |
 |---------------------|---------------------------------------------------|
-| Level 2 radar       | NOMADS (`nomads.ncep.noaa.gov`)                   |
+| Level 2 radar       | TGFTP (`tgftp.nws.noaa.gov`)                      |
 | Level 3 radar       | TGFTP (`tgftp.nws.noaa.gov`)                      |
 | GOES satellite      | NESDIS (`cdn.star.nesdis.noaa.gov`)               |
 | Watches/warnings    | NWS API (`api.weather.gov`)                       |

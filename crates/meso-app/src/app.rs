@@ -307,4 +307,12 @@ const APP_CSS: &str = r#"
 .radar-pane-inactive {
     border: 1px solid alpha(#6b7280, 0.45);
 }
+
+/* Nowcast active button highlight */
+.nowcast-active {
+    background-color: #1b5e20;
+    color: #a5d6a7;
+    border: 1px solid #4caf50;
+    font-weight: bold;
+}
 "#;

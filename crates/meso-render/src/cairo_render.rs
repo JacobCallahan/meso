@@ -13,7 +13,6 @@
 
 use anyhow::Result;
 use cairo::{Context, Format, ImageSurface};
-use std::collections::HashMap;
 
 use meso_data::map_data::MapData;
 use meso_data::radar::color_palette::ColorPalette;
@@ -176,13 +175,18 @@ fn render_quads_cairo(
             .quad_count
             .min(positions.len() / 8)
             .min(levels.len() / 4);
-        let mut buckets: HashMap<(u8, u8, u8), Vec<usize>> = HashMap::new();
+        // Group quads by gate level (0..=255) using a direct-mapped array to avoid
+        // hash collisions, heap allocations, and redundant color lookups.
+        let mut level_buckets: [Vec<usize>; 256] = std::array::from_fn(|_| Vec::new());
         for i in 0..n {
             let lvl = levels[i * 4];
-            let key = gate_color(lvl, palette);
-            buckets.entry(key).or_default().push(i);
+            level_buckets[lvl as usize].push(i);
         }
-        for ((r, g, b), indices) in buckets {
+        for (lvl, indices) in level_buckets.into_iter().enumerate() {
+            if indices.is_empty() {
+                continue;
+            }
+            let (r, g, b) = gate_color(lvl as u8, palette);
             ctx.set_source_rgb(r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
             for i in indices {
                 let base_p = i * 8;
@@ -367,6 +371,7 @@ fn draw_map_cairo(
 ) -> Result<()> {
     let w = viewport.width as f64;
     let h = viewport.height as f64;
+    let (min_lat, max_lat, min_lon, max_lon) = viewport.visible_latlon_bounds(20.0);
 
     // Helper: check if a segment might be visible (rough bounding check)
     let in_view = |x1: f64, y1: f64, x2: f64, y2: f64| -> bool {
@@ -380,6 +385,20 @@ fn draw_map_cairo(
 
     let draw_segments = |ctx: &Context, segs: &[meso_data::map_data::GeoSegment]| -> Result<()> {
         for seg in segs {
+            // Fast bounding box cull in lat/lon space prior to projection
+            let seg_min_lat = seg.lat1.min(seg.lat2);
+            let seg_max_lat = seg.lat1.max(seg.lat2);
+            let seg_min_lon = seg.lon1.min(seg.lon2);
+            let seg_max_lon = seg.lon1.max(seg.lon2);
+
+            if seg_max_lat < min_lat
+                || seg_min_lat > max_lat
+                || seg_max_lon < min_lon
+                || seg_min_lon > max_lon
+            {
+                continue;
+            }
+
             let (x1, y1) = viewport.latlon_to_screen(&meso_data::geo::latlon::LatLon {
                 lat: seg.lat1 as f64,
                 lon: seg.lon1 as f64,
@@ -430,6 +449,9 @@ fn draw_map_cairo(
     for city in &map.cities {
         if city.population < pop_threshold {
             break; // sorted descending, no need to continue
+        }
+        if city.lat < min_lat || city.lat > max_lat || city.lon < min_lon || city.lon > max_lon {
+            continue;
         }
         let (cx, cy) = viewport.latlon_to_screen(&meso_data::geo::latlon::LatLon {
             lat: city.lat as f64,

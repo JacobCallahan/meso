@@ -1680,6 +1680,7 @@ dependencies = [
  "image",
  "libadwaita",
  "meso-data",
+ "meso-nowcast",
  "meso-render",
  "pollster",
  "reqwest",
@@ -1710,6 +1711,18 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
+name = "meso-nowcast"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "meso-data",
+ "rayon",
+ "tokio",
  "tracing",
 ]
 

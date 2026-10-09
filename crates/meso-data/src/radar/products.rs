@@ -4,7 +4,9 @@
 /// The TGFTP URL pattern is:
 ///   `https://tgftp.nws.noaa.gov/SL.us008001/DF.of/DC.radar/{dir}/SI.{prefix}{site}/sn.last`
 pub const TGFTP_BASE: &str = "https://tgftp.nws.noaa.gov";
-pub const NOMADS_L2_BASE: &str = "https://nomads.ncep.noaa.gov/pub/data/nccf/radar/nexrad_level2/";
+pub const TGFTP_L2_BASE: &str = "https://tgftp.nws.noaa.gov/data/radar/nexrad_level2/";
+/// Deprecated alias kept for compatibility; NOMADS moved Level 2 data to TGFTP (SCN 26-67).
+pub const NOMADS_L2_BASE: &str = TGFTP_L2_BASE;
 pub const NWS_API_BASE: &str = "https://api.weather.gov";
 pub const NWS_SPC_BASE: &str = "https://www.spc.noaa.gov";
 pub const NWS_WPC_BASE: &str = "https://www.wpc.ncep.noaa.gov";

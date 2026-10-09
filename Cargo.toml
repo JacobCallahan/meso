@@ -4,6 +4,7 @@ members = [
     "crates/meso-render",
     "crates/meso-app",
     "crates/meso-updraft",
+    "crates/meso-nowcast",
 ]
 resolver = "2"
 

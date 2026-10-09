@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 meso-data = { path = "../meso-data" }
 meso-render = { path = "../meso-render" }
+meso-nowcast = { path = "../meso-nowcast" }
 gtk4.workspace = true
 libadwaita.workspace = true
 glib.workspace = true

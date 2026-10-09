@@ -1,8 +1,8 @@
 use crate::cache::Cache;
 use crate::geo::sites::{is_tdwr, rid_prefix};
 use crate::radar::level2;
-use crate::radar::products::{RadarProduct, NOMADS_L2_BASE, TGFTP_BASE};
-use anyhow::{Context, Result};
+use crate::radar::products::{RadarProduct, TGFTP_BASE, TGFTP_L2_BASE};
+use anyhow::{bail, Context, Result};
 use chrono::NaiveDateTime;
 use reqwest::Client;
 use std::time::Duration;
@@ -15,9 +15,10 @@ const TTL_ANIM_FRAME: Duration = Duration::from_secs(30 * 60);
 /// Radar download utilities.
 ///
 /// For Level 3, files are fetched from the NWS TGFTP server (via `sn.last`).
-/// For Level 2, files are fetched from NOMADS with HTTP Range headers to
+/// For Level 2, files are fetched from TGFTP with HTTP Range headers to
 /// download only the first portion of the file (reflectivity and velocity data
 /// live near the start of the archive).
+#[derive(Clone)]
 pub struct RadarDownloader {
     client: Client,
 }
@@ -79,9 +80,9 @@ impl RadarDownloader {
         Ok(bytes.to_vec())
     }
 
-    /// Build the NOMADS directory URL for Level 2 files.
+    /// Build the TGFTP directory URL for Level 2 files.
     pub fn level2_dir_url(site: &str) -> String {
-        // NOMADS uses 4-letter uppercase codes (KTLX, KRAX, PHKI, TJUA…).
+        // TGFTP uses 4-letter uppercase codes (KTLX, KRAX, PHKI, TJUA…).
         // Internal site codes may be 3-letter (e.g. RAX) or already 4-letter
         // (e.g. KTLX). Only expand when the code is shorter than 4 chars.
         let code = if site.len() >= 4 {
@@ -93,10 +94,10 @@ impl RadarDownloader {
                 site.to_uppercase()
             )
         };
-        format!("{}{}/", NOMADS_L2_BASE, code)
+        format!("{}{}/", TGFTP_L2_BASE, code)
     }
 
-    /// Parse NOMADS Level 2 `dir.list` lines into ordered (filename, size) entries.
+    /// Parse TGFTP Level 2 `dir.list` lines into ordered (filename, size) entries.
     ///
     /// The upstream format is not guaranteed to be stable across mirrors; this parser
     /// looks for tokens that resemble Level 2 filenames for the requested site and
@@ -113,7 +114,12 @@ impl RadarDownloader {
 
             let file_idx = parts.iter().position(|tok| {
                 let t = tok.trim();
-                t.contains(&site_up) && t.contains('_')
+                t.contains(&site_up)
+                    && t.contains('_')
+                    && !t.contains('<')
+                    && !t.contains('>')
+                    && !t.contains('"')
+                    && !t.contains('=')
             });
             let Some(i) = file_idx else {
                 continue;
@@ -143,7 +149,7 @@ impl RadarDownloader {
         out
     }
 
-    /// Legacy tokenizer fallback for NOMADS `dir.list`.
+    /// Legacy tokenizer fallback for TGFTP `dir.list`.
     ///
     /// Older logic assumed alternating `filename size` tokens and uses the same
     /// "undersized newest frame" heuristic used in wX.
@@ -158,7 +164,12 @@ impl RadarDownloader {
             let name = tokens[i].to_string();
             let size = tokens[i + 1].parse::<f64>().unwrap_or(1.0);
             // Keep only plausible radar filenames.
-            if name.contains('_') || name.starts_with("sn.") {
+            if (name.contains('_') || name.starts_with("sn."))
+                && !name.contains('<')
+                && !name.contains('>')
+                && !name.contains('"')
+                && !name.contains('=')
+            {
                 out.push((name, size));
             }
             i += 2;
@@ -166,7 +177,7 @@ impl RadarDownloader {
         out
     }
 
-    /// Fetch the `dir.list` file from NOMADS to find the latest L2 filename.
+    /// Fetch the `dir.list` file from TGFTP to find the latest L2 filename.
     /// Returns (filename, base_url).
     pub async fn latest_level2_filename(&self, site: &str) -> Result<(String, String)> {
         let base = Self::level2_dir_url(site);
@@ -224,7 +235,9 @@ impl RadarDownloader {
             // Animation frame with known URL — cache aggressively
             let key = format!("{u}:{byte_end}");
             if let Some(bytes) = cache.get(&key) {
-                return Ok(bytes);
+                if bytes.starts_with(b"AR2V") || bytes.starts_with(b"ARCH") {
+                    return Ok(bytes);
+                }
             }
             let bytes = self
                 .client
@@ -237,6 +250,9 @@ impl RadarDownloader {
                 .await?
                 .bytes()
                 .await?;
+            if bytes.len() >= 4 && !bytes.starts_with(b"AR2V") && !bytes.starts_with(b"ARCH") {
+                bail!("Received invalid Level 2 radar data (invalid header magic)");
+            }
             cache.put(&key, &bytes, TTL_ANIM_FRAME);
             return Ok(bytes.to_vec());
         }
@@ -244,7 +260,9 @@ impl RadarDownloader {
         // "Latest" fetch: cache with short TTL keyed by site+product
         let latest_key = format!("{site}-{}-latest", product.code());
         if let Some(bytes) = cache.get(&latest_key) {
-            return Ok(bytes);
+            if bytes.starts_with(b"AR2V") || bytes.starts_with(b"ARCH") {
+                return Ok(bytes);
+            }
         }
         let (fname, base) = self.latest_level2_filename(site).await?;
         let url = format!("{base}{fname}");
@@ -257,6 +275,9 @@ impl RadarDownloader {
             .await?
             .bytes()
             .await?;
+        if bytes.len() >= 4 && !bytes.starts_with(b"AR2V") && !bytes.starts_with(b"ARCH") {
+            bail!("Received invalid Level 2 radar data (invalid header magic)");
+        }
         cache.put(&latest_key, &bytes, TTL_L2_LATEST);
         Ok(bytes.to_vec())
     }
@@ -273,13 +294,32 @@ impl RadarDownloader {
         let dcache = Cache::new("radar/l2-decomp");
         let dkey = url.to_string();
         if let Some(decompressed) = dcache.get(&dkey) {
-            return Ok(decompressed);
+            if decompressed.starts_with(b"AR2V") || decompressed.starts_with(b"ARCH") {
+                return Ok(decompressed);
+            }
         }
         // Fetch compressed bytes (uses the per-URL animation cache)
         let raw = self.fetch_level2_partial(site, product, Some(url)).await?;
         let decompressed = level2::decompress_level2(&raw)?;
         dcache.put(&dkey, &decompressed, TTL_ANIM_FRAME);
         Ok(decompressed)
+    }
+
+    /// Fetch and decompress the latest Level 2 scan for a site/product.
+    ///
+    /// Unlike [`fetch_level2_partial`] + manual decompress, this method routes
+    /// through [`fetch_level2_decompressed`], which caches decompressed bytes
+    /// keyed by the file URL in `radar/l2-decomp`.  That is the same cache
+    /// that meso-updraft pre-warms, so a pre-downloaded frame is returned
+    /// without any network I/O or BZ2 decompression work.
+    pub async fn fetch_level2_latest_decompressed(
+        &self,
+        site: &str,
+        product: &RadarProduct,
+    ) -> Result<Vec<u8>> {
+        let (fname, base) = self.latest_level2_filename(site).await?;
+        let url = format!("{base}{fname}");
+        self.fetch_level2_decompressed(site, product, &url).await
     }
     pub async fn level2_filenames_for_animation(
         &self,
@@ -461,6 +501,24 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, "KTLX20240615_214500_V06");
         assert!((entries[0].1 - 2394874.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn parse_dir_entries_size_first_tgftp() {
+        let input = "4743445 KTLX_20260915_120310.bz2\n";
+        let entries = RadarDownloader::parse_level2_dir_entries("KTLX", input);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "KTLX_20260915_120310.bz2");
+        assert!((entries[0].1 - 4743445.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn parse_dir_entries_ignores_html_markup() {
+        let input = r#"<p><a href="https://tgftp.nws.noaa.gov/" target="_blank">link</a></p>"#;
+        let entries = RadarDownloader::parse_level2_dir_entries("KTLX", input);
+        assert!(entries.is_empty());
+        let legacy = RadarDownloader::parse_level2_dir_entries_legacy(input);
+        assert!(legacy.is_empty());
     }
 
     #[test]

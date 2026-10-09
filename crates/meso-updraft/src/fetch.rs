@@ -13,6 +13,10 @@ use anyhow::Result;
 use reqwest::Client;
 use tracing::{info, warn};
 
+use std::sync::Arc;
+use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+
 use meso_data::cache::Cache;
 use meso_data::goes;
 use meso_data::radar::{download::RadarDownloader, products::RadarProduct};
@@ -35,30 +39,51 @@ pub async fn fetch_radar(
             .await?;
         let mut fetched = 0usize;
         let mut skipped = 0usize;
+        let mut uncached = Vec::new();
         for fname in &fnames {
             let url = format!("{base}{fname}");
             if dcache.contains(&url) {
                 skipped += 1;
-                continue;
+            } else {
+                uncached.push((fname.clone(), url));
             }
-            match dl
-                .fetch_level2_decompressed(&sub.station, &product, &url)
-                .await
-            {
-                Ok(bytes) => {
-                    fetched += 1;
-                    info!(
-                        "updraft: cached L2 frame {}/{} {} ({} bytes)",
-                        sub.station,
-                        sub.product,
-                        fname,
-                        bytes.len()
-                    );
+        }
+        if !uncached.is_empty() {
+            let sem = Arc::new(Semaphore::new(4));
+            let mut set = JoinSet::new();
+            for (fname, url) in uncached {
+                let permit = Arc::clone(&sem)
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let dl = dl.clone();
+                let station = sub.station.clone();
+                let product = product;
+                set.spawn(async move {
+                    let _permit = permit;
+                    let res = dl.fetch_level2_decompressed(&station, &product, &url).await;
+                    (fname, res)
+                });
+            }
+            while let Some(res) = set.join_next().await {
+                if let Ok((fname, fetch_res)) = res {
+                    match fetch_res {
+                        Ok(bytes) => {
+                            fetched += 1;
+                            info!(
+                                "updraft: cached L2 frame {}/{} {} ({} bytes)",
+                                sub.station,
+                                sub.product,
+                                fname,
+                                bytes.len()
+                            );
+                        }
+                        Err(e) => warn!(
+                            "updraft: L2 frame fetch failed {}/{} {}: {e}",
+                            sub.station, sub.product, fname
+                        ),
+                    }
                 }
-                Err(e) => warn!(
-                    "updraft: L2 frame fetch failed {}/{} {}: {e}",
-                    sub.station, sub.product, fname
-                ),
             }
         }
         info!(
@@ -76,6 +101,7 @@ pub async fn fetch_radar(
             .await?;
         let mut fetched = 0usize;
         let mut skipped = 0usize;
+        let mut uncached = Vec::new();
         for fname in &fnames {
             let url = match RadarDownloader::level3_file_url(&sub.station, &product, fname) {
                 Some(u) => u,
@@ -83,23 +109,44 @@ pub async fn fetch_radar(
             };
             if acache.contains(&url) {
                 skipped += 1;
-                continue;
+            } else {
+                uncached.push((fname.clone(), url));
             }
-            match dl.fetch_bytes(&url).await {
-                Ok(bytes) => {
-                    fetched += 1;
-                    info!(
-                        "updraft: cached L3 frame {}/{} {} ({} bytes)",
-                        sub.station,
-                        sub.product,
-                        fname,
-                        bytes.len()
-                    );
+        }
+        if !uncached.is_empty() {
+            let sem = Arc::new(Semaphore::new(4));
+            let mut set = JoinSet::new();
+            for (fname, url) in uncached {
+                let permit = Arc::clone(&sem)
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let dl = dl.clone();
+                set.spawn(async move {
+                    let _permit = permit;
+                    let res = dl.fetch_bytes(&url).await;
+                    (fname, res)
+                });
+            }
+            while let Some(res) = set.join_next().await {
+                if let Ok((fname, fetch_res)) = res {
+                    match fetch_res {
+                        Ok(bytes) => {
+                            fetched += 1;
+                            info!(
+                                "updraft: cached L3 frame {}/{} {} ({} bytes)",
+                                sub.station,
+                                sub.product,
+                                fname,
+                                bytes.len()
+                            );
+                        }
+                        Err(e) => warn!(
+                            "updraft: L3 frame fetch failed {}/{} {}: {e}",
+                            sub.station, sub.product, fname
+                        ),
+                    }
                 }
-                Err(e) => warn!(
-                    "updraft: L3 frame fetch failed {}/{} {}: {e}",
-                    sub.station, sub.product, fname
-                ),
             }
         }
         info!(
@@ -124,25 +171,47 @@ pub async fn fetch_satellite(
     let gcache = Cache::new("goes");
     let mut fetched = 0usize;
     let mut skipped = 0usize;
+    let mut uncached = Vec::new();
     for url in &urls {
         if gcache.contains(url) {
             skipped += 1;
-            continue;
+        } else {
+            uncached.push(url.clone());
         }
-        match goes::fetch_image(client, url).await {
-            Ok(bytes) => {
-                fetched += 1;
-                info!(
-                    "updraft: cached satellite {}/{} frame ({} bytes)",
-                    sub.sector,
-                    sub.band,
-                    bytes.len()
-                );
+    }
+    if !uncached.is_empty() {
+        let sem = Arc::new(Semaphore::new(4));
+        let mut set = JoinSet::new();
+        for url in uncached {
+            let permit = Arc::clone(&sem)
+                .acquire_owned()
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let client = client.clone();
+            set.spawn(async move {
+                let _permit = permit;
+                let res = goes::fetch_image(&client, &url).await;
+                (url, res)
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok((_url, fetch_res)) = res {
+                match fetch_res {
+                    Ok(bytes) => {
+                        fetched += 1;
+                        info!(
+                            "updraft: cached satellite {}/{} frame ({} bytes)",
+                            sub.sector,
+                            sub.band,
+                            bytes.len()
+                        );
+                    }
+                    Err(e) => warn!(
+                        "updraft: satellite frame fetch failed {}/{}: {e}",
+                        sub.sector, sub.band
+                    ),
+                }
             }
-            Err(e) => warn!(
-                "updraft: satellite frame fetch failed {}/{}: {e}",
-                sub.sector, sub.band
-            ),
         }
     }
     info!(

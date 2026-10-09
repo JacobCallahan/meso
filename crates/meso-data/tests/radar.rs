@@ -54,10 +54,10 @@ async fn fetch_and_decode_level3_n0u_ktlx() {
     assert!(data.num_radials > 0);
 }
 
-/// Fetch the Level 2 directory listing for KTLX from NOMADS and verify the
+/// Fetch the Level 2 directory listing for KTLX from TGFTP and verify the
 /// returned filename looks like a real NEXRAD archive filename.
 #[tokio::test]
-#[ignore = "requires network access to nomads.ncep.noaa.gov"]
+#[ignore = "requires network access to tgftp.nws.noaa.gov"]
 async fn fetch_level2_latest_filename_ktlx() {
     let client = wx_client();
     let dl = RadarDownloader::new(client);
@@ -71,15 +71,15 @@ async fn fetch_level2_latest_filename_ktlx() {
         "filename should contain site code, got: {filename}"
     );
     assert!(
-        base_url.contains("nomads.ncep.noaa.gov"),
-        "base URL should point to NOMADS, got: {base_url}"
+        base_url.contains("tgftp.nws.noaa.gov"),
+        "base URL should point to TGFTP, got: {base_url}"
     );
 }
 
 /// Fetch a partial Level 2 archive for KTLX (reflectivity) and verify the raw
-/// bytes decompress without error.
+/// bytes decompress and decode without error.
 #[tokio::test]
-#[ignore = "requires network access to nomads.ncep.noaa.gov"]
+#[ignore = "requires network access to tgftp.nws.noaa.gov"]
 async fn fetch_level2_partial_and_decompress_ktlx() {
     let client = wx_client();
     let dl = RadarDownloader::new(client);
@@ -103,12 +103,41 @@ async fn fetch_level2_partial_and_decompress_ktlx() {
         &raw[..24],
         "decompression must preserve the Level 2 file header"
     );
+
+    let tilts = level2::list_tilts(&decompressed, false).expect("list tilts");
+    assert!(!tilts.is_empty(), "tilts should not be empty");
+    let l2 = level2::decode(&decompressed, false, 0).expect("decode reflectivity tilt 0");
+    assert!(!l2.azimuths.is_empty(), "decoded radials should not be empty");
+}
+
+/// Fetch a partial Level 2 archive for KTLX (velocity) and verify the raw
+/// bytes decompress and decode without error.
+#[tokio::test]
+#[ignore = "requires network access to tgftp.nws.noaa.gov"]
+async fn fetch_level2_velocity_partial_and_decompress_ktlx() {
+    let client = wx_client();
+    let dl = RadarDownloader::new(client);
+    let raw = dl
+        .fetch_level2_partial("KTLX", &RadarProduct::L2Velocity, None)
+        .await
+        .expect("fetch Level 2 velocity partial bytes");
+    assert!(!raw.is_empty(), "raw bytes should not be empty");
+    assert!(
+        raw.len() >= 24,
+        "raw bytes should contain at least the 24-byte Level 2 header"
+    );
+
+    let decompressed = level2::decompress_level2(&raw).expect("decompress Level 2 data");
+    let tilts = level2::list_tilts(&decompressed, true).expect("list velocity tilts");
+    assert!(!tilts.is_empty(), "velocity tilts should not be empty");
+    let l2 = level2::decode(&decompressed, true, 0).expect("decode velocity tilt 0");
+    assert!(!l2.azimuths.is_empty(), "decoded velocity radials should not be empty");
 }
 
 /// Verify that `level2_filenames_for_animation` returns a non-empty list of
 /// plausible NEXRAD filenames for KTLX.
 #[tokio::test]
-#[ignore = "requires network access to nomads.ncep.noaa.gov"]
+#[ignore = "requires network access to tgftp.nws.noaa.gov"]
 async fn level2_animation_filenames_ktlx() {
     let client = wx_client();
     let dl = RadarDownloader::new(client);

@@ -41,31 +41,18 @@ where
     T: Send + 'static,
     C: FnOnce(T) + 'static,
 {
-    let (sender, receiver) = std::sync::mpsc::channel::<T>();
+    let (tx, rx) = tokio::sync::oneshot::channel::<T>();
 
     runtime().spawn(async move {
         let result = task.await;
-        let _ = sender.send(result);
+        let _ = tx.send(result);
     });
 
-    // `on_complete` is FnOnce so wrap it in Option to satisfy the Fn bound
-    // required by glib::timeout_add_local.
-    let mut on_complete = Some(on_complete);
-
-    // Poll the channel on the GLib main loop
-    glib::timeout_add_local(
-        std::time::Duration::from_millis(10),
-        move || match receiver.try_recv() {
-            Ok(result) => {
-                if let Some(cb) = on_complete.take() {
-                    cb(result);
-                }
-                glib::ControlFlow::Break
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => glib::ControlFlow::Continue,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => glib::ControlFlow::Break,
-        },
-    );
+    glib::spawn_future_local(async move {
+        if let Ok(result) = rx.await {
+            on_complete(result);
+        }
+    });
 }
 
 /// Shared progress slot — write from async, read from GTK thread.

@@ -114,4 +114,21 @@ impl Viewport {
         self.center.lat = (self.center.lat + dlat.to_degrees()).clamp(-85.0, 85.0);
         self.center.lon += dlon.to_degrees();
     }
+
+    /// Return (min_lat, max_lat, min_lon, max_lon) for the visible screen area plus a pixel margin.
+    pub fn visible_latlon_bounds(&self, margin_px: f64) -> (f32, f32, f32, f32) {
+        let w = self.width as f64;
+        let h = self.height as f64;
+        let tl = self.screen_to_latlon(-margin_px, -margin_px);
+        let tr = self.screen_to_latlon(w + margin_px, -margin_px);
+        let bl = self.screen_to_latlon(-margin_px, h + margin_px);
+        let br = self.screen_to_latlon(w + margin_px, h + margin_px);
+
+        let min_lat = tl.lat.min(tr.lat).min(bl.lat).min(br.lat) as f32;
+        let max_lat = tl.lat.max(tr.lat).max(bl.lat).max(br.lat) as f32;
+        let min_lon = tl.lon.min(tr.lon).min(bl.lon).min(br.lon) as f32;
+        let max_lon = tl.lon.max(tr.lon).max(bl.lon).max(br.lon) as f32;
+
+        (min_lat, max_lat, min_lon, max_lon)
+    }
 }

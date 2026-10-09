@@ -43,6 +43,7 @@ use meso_render::cairo_render;
 use meso_render::overlay::{
     build_storm_tracks_layer, build_warnings_layer, warning_color, OverlayLayer, OverlaySet,
 };
+use meso_nowcast::{run_nowcast_level2, run_nowcast_level3, NowcastResult};
 use meso_render::viewport::Viewport;
 
 use crate::config::{Config, NamedLocation, RadarTrack, RadarTrackPoint};
@@ -102,6 +103,7 @@ struct RadarPaneState {
     wgpu_geo: Option<Arc<meso_render::wgpu_render::WgpuRadarGeometry>>,
     gl_display: Option<GLArea>,
     gl_blit: Option<crate::gl_blit::GlBlitContext>,
+    nowcast_start_index: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -185,6 +187,7 @@ impl RadarPaneState {
             wgpu_geo: None,
             gl_display: None,
             gl_blit: None,
+            nowcast_start_index: None,
         };
 
         let use_gpu = cfg.use_gpu;
@@ -370,6 +373,7 @@ impl RadarPaneState {
         self.wgpu_geo = None;
         self.cached_map_surface = None;
         self.cached_map_cache_key = None;
+        self.nowcast_start_index = None;
     }
 }
 
@@ -617,6 +621,9 @@ pub fn build_radar_pane(
     frames_spin.set_width_chars(3);
     toolbar.append(&frames_spin);
     toolbar.append(&anim_btn);
+    let nowcast_btn = Button::with_label("🔮 Nowcast");
+    nowcast_btn.set_tooltip_text(Some("Generate 1–2 hour forecast from current radar animation"));
+    toolbar.append(&nowcast_btn);
     toolbar.append(&pane_toggle_btn);
     toolbar.append(&overlay_btn);
     vbox.append(&toolbar);
@@ -959,7 +966,15 @@ pub fn build_radar_pane(
                         }
                     }
                 }
-                cr.set_source_rgb(1.0, 1.0, 0.8);
+                let is_nowcast = st
+                    .nowcast_start_index
+                    .map_or(false, |start| st.anim_index >= start)
+                    || ts.contains("Nowcast");
+                if is_nowcast {
+                    cr.set_source_rgb(0.2, 1.0, 0.3);
+                } else {
+                    cr.set_source_rgb(1.0, 1.0, 0.8);
+                }
                 cr.move_to(x, y);
                 let _ = cr.show_text(ts);
             }
@@ -1019,7 +1034,15 @@ pub fn build_radar_pane(
                         }
                     }
                 }
-                cr.set_source_rgb(1.0, 1.0, 0.8);
+                let is_nowcast = st
+                    .nowcast_start_index
+                    .map_or(false, |start| st.anim_index >= start)
+                    || ts.contains("Nowcast");
+                if is_nowcast {
+                    cr.set_source_rgb(0.2, 1.0, 0.3);
+                } else {
+                    cr.set_source_rgb(1.0, 1.0, 0.8);
+                }
                 cr.move_to(x, y);
                 let _ = cr.show_text(ts);
             }
@@ -1036,6 +1059,7 @@ pub fn build_radar_pane(
         let anim_running = Rc::clone(&anim_running);
         let anim_timer = Rc::clone(&anim_timer);
         let anim_btn = anim_btn.clone();
+        let nowcast_btn_sc = nowcast_btn.clone();
         let status = status.clone();
         let tilt_combo = tilt_combo.clone();
         let site_ids = site_ids.clone();
@@ -1057,6 +1081,9 @@ pub fn build_radar_pane(
             }
             stop_animation(&anim_running, &anim_timer);
             anim_btn.set_label("▶ Animate");
+            nowcast_btn_sc.set_label("🔮 Nowcast");
+            nowcast_btn_sc.remove_css_class("nowcast-active");
+            nowcast_btn_sc.remove_css_class("suggested-action");
 
             let current_zoom = {
                 let st = left_state.borrow();
@@ -1686,6 +1713,7 @@ pub fn build_radar_pane(
         let set_active_ui = Rc::clone(&set_active_ui);
         let anim_running_c = Rc::clone(&anim_running);
         let anim_timer_c = Rc::clone(&anim_timer);
+        let nowcast_btn_pt = nowcast_btn.clone();
         pane_toggle_btn.connect_clicked(move |_| {
             let count = if pane_count_c.get() == 2 { 1 } else { 2 };
             pane_count_c.set(count);
@@ -1694,10 +1722,14 @@ pub fn build_radar_pane(
 
             // Stop animation before switching panes
             stop_animation(&anim_running_c, &anim_timer_c);
+            nowcast_btn_pt.set_label("🔮 Nowcast");
+            nowcast_btn_pt.remove_css_class("nowcast-active");
+            nowcast_btn_pt.remove_css_class("suggested-action");
 
             // Clear animation pixbuf caches when switching pane count so frames re-render at correct size
             {
                 let mut left_st = left_state_c.borrow_mut();
+                left_st.nowcast_start_index = None;
                 let has_anim =
                     !left_st.anim_l2_frames.is_empty() || !left_st.anim_l3_frames.is_empty();
                 if has_anim {
@@ -1710,6 +1742,7 @@ pub fn build_radar_pane(
             }
             {
                 let mut right_st = right_state_c.borrow_mut();
+                right_st.nowcast_start_index = None;
                 let has_anim =
                     !right_st.anim_l2_frames.is_empty() || !right_st.anim_l3_frames.is_empty();
                 if has_anim {
@@ -1836,6 +1869,20 @@ pub fn build_radar_pane(
         let group_names_g = Rc::clone(&group_names);
         let prod_strings_g = prod_strings.clone();
         let prod_codes_g = Rc::clone(&prod_codes);
+        let left_state_g = Rc::clone(&left_state);
+        let right_state_g = Rc::clone(&right_state);
+        let left_da_g = left_da.clone();
+        let right_da_g = right_da.clone();
+        let status_g = status.clone();
+        let cfg_g = Rc::clone(&shared_cfg);
+        let active_slot_g = Rc::clone(&active_slot);
+        let pane_count_g = Rc::clone(&pane_count);
+        let anim_running_g = Rc::clone(&anim_running);
+        let anim_timer_g = Rc::clone(&anim_timer);
+        let anim_btn_g = anim_btn.clone();
+        let nowcast_btn_g = nowcast_btn.clone();
+        let tilt_combo_g = tilt_combo.clone();
+        let btns_g = vec![refresh_btn.clone(), anim_btn.clone()];
         group_combo.connect_selected_notify(move |group_combo| {
             let group = group_names_g
                 .borrow()
@@ -1851,7 +1898,62 @@ pub fn build_radar_pane(
             let labels: Vec<&str> = products.iter().map(|p| p.label()).collect();
             prod_strings_g.splice(0, prod_strings_g.n_items(), &labels);
             *prod_codes_g.borrow_mut() = products.iter().map(|p| p.code()).collect();
+
+            // Resetting to 0 fires prod_combo's selected-notify only when the index
+            // actually changes (i.e., prod was at >0).  That handler updates state.product
+            // synchronously, so the direct-load check below will then see current == new_prod
+            // and correctly skip to avoid a double-load.
             combo.set_selected(0);
+
+            // GTK4's SingleSelection has autoselect=true, which means set_selected(INVALID)
+            // is immediately corrected back to 0 when items exist — so selected-notify never
+            // fires when the combo was already at index 0.  We work around this by always
+            // triggering the load for the first product directly from this handler.
+            let slot = if pane_count_g.get() == 1 {
+                0
+            } else {
+                active_slot_g.get()
+            };
+            let (state_ref, da_ref) = if slot == 0 {
+                (Rc::clone(&left_state_g), left_da_g.clone())
+            } else {
+                (Rc::clone(&right_state_g), right_da_g.clone())
+            };
+            if let Some(&first_code) = prod_codes_g.borrow().get(0) {
+                if let Some(new_prod) = RadarProduct::from_code(first_code)
+                    .filter(|p| p.is_map_supported() && p.supports_site(&site_id))
+                {
+                    let current = state_ref.borrow().product;
+                    // current == new_prod when prod_combo was at >0 and its selected-notify
+                    // already ran and updated the state; skip to avoid a duplicate fetch.
+                    if current != new_prod {
+                        stop_animation(&anim_running_g, &anim_timer_g);
+                        anim_btn_g.set_label("▶ Animate");
+                        nowcast_btn_g.set_label("🔮 Nowcast");
+                        nowcast_btn_g.remove_css_class("nowcast-active");
+                        nowcast_btn_g.remove_css_class("suggested-action");
+                        {
+                            let mut st = state_ref.borrow_mut();
+                            st.product = new_prod;
+                            st.clear_cache();
+                        }
+                        if slot == 0 {
+                            let mut cfg = cfg_g.borrow_mut();
+                            cfg.radar_product_left = first_code.to_string();
+                            cfg.radar_product = first_code.to_string();
+                        } else {
+                            cfg_g.borrow_mut().radar_product_right = first_code.to_string();
+                        }
+                        trigger_load(
+                            state_ref,
+                            da_ref,
+                            status_g.clone(),
+                            btns_g.clone(),
+                            tilt_combo_g.clone(),
+                        );
+                    }
+                }
+            }
         });
     }
 
@@ -1867,6 +1969,7 @@ pub fn build_radar_pane(
         let anim_running_c = Rc::clone(&anim_running);
         let anim_timer_c = Rc::clone(&anim_timer);
         let anim_btn_c = anim_btn.clone();
+        let nowcast_btn_pc = nowcast_btn.clone();
         let tilt_combo_c = tilt_combo.clone();
         let site_ids_c = site_ids.clone();
         let site_combo_c = site_combo.clone();
@@ -1897,6 +2000,9 @@ pub fn build_radar_pane(
                     if current_product != prod {
                         stop_animation(&anim_running_c, &anim_timer_c);
                         anim_btn_c.set_label("▶ Animate");
+                        nowcast_btn_pc.set_label("🔮 Nowcast");
+                        nowcast_btn_pc.remove_css_class("nowcast-active");
+                        nowcast_btn_pc.remove_css_class("suggested-action");
                         if slot == 0 {
                             {
                                 let mut cfg = cfg_c.borrow_mut();
@@ -2060,7 +2166,11 @@ pub fn build_radar_pane(
         let pane_count_c = Rc::clone(&pane_count);
         let tilt_combo_c = tilt_combo.clone();
         let btns_ref = vec![refresh_btn.clone(), anim_btn.clone()];
+        let nowcast_btn_rf = nowcast_btn.clone();
         refresh_btn.connect_clicked(move |_| {
+            nowcast_btn_rf.set_label("🔮 Nowcast");
+            nowcast_btn_rf.remove_css_class("nowcast-active");
+            nowcast_btn_rf.remove_css_class("suggested-action");
             left_state_c.borrow_mut().clear_cache();
             right_state_c.borrow_mut().clear_cache();
             trigger_load(
@@ -2392,6 +2502,209 @@ pub fn build_radar_pane(
     }
 
     {
+        let left_state_nc = Rc::clone(&left_state);
+        let right_state_nc = Rc::clone(&right_state);
+        let left_da_nc = left_da.clone();
+        let right_da_nc = right_da.clone();
+        let pane_count_nc = Rc::clone(&pane_count);
+        let status_nc = status.clone();
+        let timeline_nc = timeline.clone();
+        let su_nc = Rc::clone(&slider_updating);
+        let anim_running_nc = Rc::clone(&anim_running);
+        let anim_timer_nc = Rc::clone(&anim_timer);
+        let anim_btn_nc = anim_btn.clone();
+        let shared_index_nc = Rc::clone(&shared_index);
+
+        nowcast_btn.connect_clicked(move |btn| {
+            let is_nowcasting = left_state_nc.borrow().nowcast_start_index.is_some()
+                || (pane_count_nc.get() == 2 && right_state_nc.borrow().nowcast_start_index.is_some());
+
+            if is_nowcasting {
+                let left_len = clear_nowcast_for_state(&left_state_nc);
+                let right_len = if pane_count_nc.get() == 2 {
+                    clear_nowcast_for_state(&right_state_nc)
+                } else {
+                    left_len
+                };
+                let n = left_len.min(right_len);
+                if n > 0 {
+                    su_nc.set(true);
+                    timeline_nc.set_range(0.0, (n - 1) as f64);
+                    su_nc.set(false);
+                }
+                btn.set_label("🔮 Nowcast");
+                btn.remove_css_class("suggested-action");
+                btn.remove_css_class("nowcast-active");
+                status_nc.set_text("Nowcast cleared — showing observed frames");
+                queue_pane_redraw(&left_state_nc, &left_da_nc);
+                if pane_count_nc.get() == 2 {
+                    queue_pane_redraw(&right_state_nc, &right_da_nc);
+                }
+                return;
+            }
+
+            let left_has_frames = {
+                let st = left_state_nc.borrow();
+                !st.anim_l2_frames.is_empty() || !st.anim_l3_frames.is_empty()
+            };
+
+            if !left_has_frames {
+                status_nc.set_text("Nowcast requires animation frames — click ▶ Animate first");
+                return;
+            }
+
+            let (left_l2, left_l3, left_is_vel) = {
+                let st = left_state_nc.borrow();
+                let l2: Vec<Level2Data> = st.anim_l2_frames.iter().map(|(f, _)| f.clone()).collect();
+                let l3 = st.anim_l3_frames.clone();
+                let is_vel = st.product.is_velocity();
+                (l2, l3, is_vel)
+            };
+
+            let is_dual = pane_count_nc.get() == 2;
+            let (right_l2, right_l3, right_is_vel) = if is_dual {
+                let st = right_state_nc.borrow();
+                let l2: Vec<Level2Data> = st.anim_l2_frames.iter().map(|(f, _)| f.clone()).collect();
+                let l3 = st.anim_l3_frames.clone();
+                let is_vel = st.product.is_velocity();
+                (l2, l3, is_vel)
+            } else {
+                (Vec::new(), Vec::new(), false)
+            };
+
+            btn.set_sensitive(false);
+            btn.set_label("⏳ Nowcasting...");
+            status_nc.set_text("Estimating radar motion & nowcasting 1–2 hours...");
+
+            let btn_done = btn.clone();
+            let status_done = status_nc.clone();
+            let left_st_done = Rc::clone(&left_state_nc);
+            let right_st_done = Rc::clone(&right_state_nc);
+            let left_da_done = left_da_nc.clone();
+            let right_da_done = right_da_nc.clone();
+            let timeline_done = timeline_nc.clone();
+            let su_done = Rc::clone(&su_nc);
+            let pane_count_done = Rc::clone(&pane_count_nc);
+            let ar_done = Rc::clone(&anim_running_nc);
+            let at_done = Rc::clone(&anim_timer_nc);
+            let anim_btn_done = anim_btn_nc.clone();
+            let shared_idx_done = Rc::clone(&shared_index_nc);
+
+            runtime::spawn(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        let left_result = if !left_l2.is_empty() {
+                            run_nowcast_level2(&left_l2, None)
+                                .map(|res| NowcastBundle::L2(res, left_is_vel))
+                        } else {
+                            run_nowcast_level3(&left_l3, None)
+                                .map(NowcastBundle::L3)
+                        };
+
+                        let right_result = if is_dual {
+                            if !right_l2.is_empty() {
+                                Some(
+                                    run_nowcast_level2(&right_l2, None)
+                                        .map(|res| NowcastBundle::L2(res, right_is_vel)),
+                                )
+                            } else if !right_l3.is_empty() {
+                                Some(
+                                    run_nowcast_level3(&right_l3, None)
+                                        .map(NowcastBundle::L3),
+                                )
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+
+                        Ok::<_, anyhow::Error>((left_result, right_result))
+                    })
+                    .await?
+                },
+                move |result| {
+                    btn_done.set_sensitive(true);
+                    match result {
+                        Ok((left_res, right_res)) => {
+                            let left_bundle = match left_res {
+                                Ok(b) => b,
+                                Err(e) => {
+                                    status_done.set_text(&format!("Nowcast error: {e}"));
+                                    btn_done.set_label("🔮 Nowcast");
+                                    return;
+                                }
+                            };
+
+                            let (obs_len, nowcast_count, interval_secs) = append_nowcast_to_state(
+                                &left_st_done,
+                                &left_da_done,
+                                left_bundle,
+                            );
+
+                            if let Some(Ok(right_bundle)) = right_res {
+                                append_nowcast_to_state(
+                                    &right_st_done,
+                                    &right_da_done,
+                                    right_bundle,
+                                );
+                            }
+
+                            let total_len = obs_len + nowcast_count;
+                            su_done.set(true);
+                            timeline_done.set_range(0.0, (total_len - 1) as f64);
+                            su_done.set(false);
+
+                            btn_done.set_label("🔮 Clear Nowcast");
+                            btn_done.add_css_class("suggested-action");
+                            btn_done.add_css_class("nowcast-active");
+
+                            let mins_forecast = (nowcast_count as i64 * interval_secs + 30) / 60;
+                            status_done.set_text(&format!(
+                                "Nowcast active: {} frames ({} observed + {} forecast | +{}h lead)",
+                                total_len,
+                                obs_len,
+                                nowcast_count,
+                                (mins_forecast as f32 / 60.0).round() as i64
+                            ));
+
+                            if !ar_done.get() {
+                                ar_done.set(true);
+                                anim_btn_done.set_label("⏸ Pause");
+                                let active_states = if pane_count_done.get() == 2 {
+                                    vec![
+                                        (Rc::clone(&left_st_done), left_da_done.clone()),
+                                        (Rc::clone(&right_st_done), right_da_done.clone()),
+                                    ]
+                                } else {
+                                    vec![(Rc::clone(&left_st_done), left_da_done.clone())]
+                                };
+                                start_shared_timer(
+                                    active_states,
+                                    Rc::clone(&ar_done),
+                                    Rc::clone(&at_done),
+                                    timeline_done.clone(),
+                                    Rc::clone(&su_done),
+                                    Rc::clone(&shared_idx_done),
+                                );
+                            }
+
+                            queue_pane_redraw(&left_st_done, &left_da_done);
+                            if pane_count_done.get() == 2 {
+                                queue_pane_redraw(&right_st_done, &right_da_done);
+                            }
+                        }
+                        Err(e) => {
+                            btn_done.set_label("🔮 Nowcast");
+                            status_done.set_text(&format!("Nowcast error: {e}"));
+                        }
+                    }
+                },
+            );
+        });
+    }
+
+    {
         let left_state_tl = Rc::clone(&left_state);
         let right_state_tl = Rc::clone(&right_state);
         let left_da_tl = left_da.clone();
@@ -2560,6 +2873,85 @@ pub fn build_radar_pane(
     (vbox, change_site_fn)
 }
 
+// ── Nowcast helpers ───────────────────────────────────────────────────────────
+
+enum NowcastBundle {
+    L2(NowcastResult<Level2Data>, bool),
+    L3(NowcastResult<Level3Data>),
+}
+
+fn clear_nowcast_for_state(state: &Rc<RefCell<RadarPaneState>>) -> usize {
+    let mut st = state.borrow_mut();
+    if let Some(start_idx) = st.nowcast_start_index.take() {
+        st.anim_surfaces.truncate(start_idx);
+        st.anim_timestamps.truncate(start_idx);
+        st.anim_frame_stale.truncate(start_idx);
+        st.anim_frame_inflight.truncate(start_idx);
+        st.anim_l2_frames.truncate(start_idx);
+        st.anim_l3_frames.truncate(start_idx);
+        if st.anim_index >= start_idx {
+            st.anim_index = start_idx.saturating_sub(1);
+            st.current_surface = st.anim_surfaces.get(st.anim_index).cloned();
+            st.timestamp_str = st.anim_timestamps.get(st.anim_index).cloned();
+        }
+    }
+    st.anim_surfaces.len()
+}
+
+fn append_nowcast_to_state(
+    state: &Rc<RefCell<RadarPaneState>>,
+    da: &DrawingArea,
+    bundle: NowcastBundle,
+) -> (usize, usize, i64) {
+    let (obs_len, nowcast_count, interval_secs) = {
+        let mut st = state.borrow_mut();
+        let obs_len = st.anim_surfaces.len();
+        st.nowcast_start_index = Some(obs_len);
+        st.wgpu_anim = None;
+
+        let placeholder = st.current_surface.clone().unwrap_or_else(|| {
+            cairo_render::render_map_only(
+                &st.viewport,
+                &st.overlays,
+                Some(st.map_data.as_ref()),
+            )
+            .expect("render_map_only failed creating placeholder")
+        });
+
+        match bundle {
+            NowcastBundle::L2(res, is_vel) => {
+                let n = res.frames.len();
+                let dt = res.interval_secs;
+                for f in res.frames {
+                    st.anim_l2_frames.push((f, is_vel));
+                }
+                st.anim_timestamps.extend(res.timestamps);
+                st.anim_surfaces.extend(vec![placeholder; n]);
+                st.anim_frame_stale.extend(vec![true; n]);
+                st.anim_frame_inflight.extend(vec![false; n]);
+                (obs_len, n, dt)
+            }
+            NowcastBundle::L3(res) => {
+                let n = res.frames.len();
+                let dt = res.interval_secs;
+                st.anim_l3_frames.extend(res.frames);
+                st.anim_timestamps.extend(res.timestamps);
+                st.anim_surfaces.extend(vec![placeholder; n]);
+                st.anim_frame_stale.extend(vec![true; n]);
+                st.anim_frame_inflight.extend(vec![false; n]);
+                (obs_len, n, dt)
+            }
+        }
+    };
+
+    let total_len = obs_len + nowcast_count;
+    for i in obs_len..total_len {
+        request_anim_frame_rerender_async(Rc::clone(state), da.clone(), i);
+    }
+
+    (obs_len, nowcast_count, interval_secs)
+}
+
 // ── Animation helpers ─────────────────────────────────────────────────────────
 
 fn stop_animation(running: &Rc<Cell<bool>>, timer: &Rc<RefCell<Option<glib::SourceId>>>) {
@@ -2648,6 +3040,7 @@ fn load_animation_frames<F>(
     let on_done: Rc<dyn Fn(Result<usize, String>)> = Rc::new(on_done);
     let product = state.borrow().product;
     let site_id = state.borrow().site_id.clone();
+    let tilt_idx = state.borrow().l2_tilt_idx;
     let progress: runtime::ProgressSlot = Arc::new(Mutex::new(None));
     let stop_progress = runtime::progress_poller(Arc::clone(&progress), status.clone());
     if product.is_level2() {
@@ -2669,58 +3062,85 @@ fn load_animation_frames<F>(
                     .level2_filenames_for_animation(&site_id, frame_count)
                     .await?;
                 let base = RadarDownloader::level2_dir_url(&site_id);
-                let mut frames = Vec::new();
                 let total = filenames.len();
-                for (i, fname) in filenames.iter().enumerate() {
-                    if let Ok(mut g) = progress_c.lock() {
-                        *g = Some(format!("Fetching/decompressing frame {}/{}", i + 1, total));
-                    }
+                let sem = Arc::new(tokio::sync::Semaphore::new(4));
+                let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let mut set = tokio::task::JoinSet::new();
+
+                for (idx, fname) in filenames.into_iter().enumerate() {
+                    let permit = Arc::clone(&sem)
+                        .acquire_owned()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let dl = dl.clone();
+                    let site_id = site_id.clone();
+                    let l2_product = l2_product;
                     let url = format!("{base}{fname}");
-                    frames.push(
-                        dl.fetch_level2_decompressed(&site_id, &l2_product, &url)
-                            .await?,
-                    );
+                    let progress_c = Arc::clone(&progress_c);
+                    let completed = Arc::clone(&completed);
+
+                    set.spawn(async move {
+                        let _permit = permit;
+                        let raw = dl
+                            .fetch_level2_decompressed(&site_id, &l2_product, &url)
+                            .await?;
+                        let count = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if let Ok(mut g) = progress_c.lock() {
+                            *g = Some(format!("Fetching frame {}/{}", count, total));
+                        }
+                        let decoded = tokio::task::spawn_blocking(move || {
+                            level2::decode(&raw, velocity, tilt_idx)
+                        })
+                        .await??;
+                        Ok::<_, anyhow::Error>((idx, decoded))
+                    });
                 }
+
+                let mut indexed = Vec::with_capacity(total);
+                while let Some(res) = set.join_next().await {
+                    let (idx, l2) = res.map_err(|e| anyhow::anyhow!("Join error: {e}"))??;
+                    indexed.push((idx, l2));
+                }
+                indexed.sort_by_key(|(idx, _)| *idx);
+                let frames: Vec<level2::Level2Data> = indexed.into_iter().map(|(_, l2)| l2).collect();
                 Ok::<_, anyhow::Error>((frames, velocity))
             },
             move |result| match result {
-                Ok((decomp_frames, vel)) => {
+                Ok((decoded_frames, vel)) => {
                     stop_progress.set(true);
                     status.set_text(&format!(
                         "Constructing animation from {} frames...",
-                        decomp_frames.len()
+                        decoded_frames.len()
                     ));
                     let mut surfaces = Vec::new();
                     let mut timestamps = Vec::new();
                     let mut decoded = Vec::new();
-                    for decompressed in decomp_frames {
-                        let tilt_idx = state.borrow().l2_tilt_idx;
-                        let st = state.borrow();
-                        if let Ok(l2) = level2::decode(&decompressed, vel, tilt_idx) {
-                            let code: u16 = if vel { 99 } else { 94 };
-                            let palette = st.palette_registry.for_product(code);
-                            if let Ok(img) = render_level2_helper(
-                                GpuRenderCtx {
-                                    use_gpu: st.use_gpu,
-                                    wgpu_ctx: &st.wgpu_ctx,
-                                    wgpu_pipeline: &st.wgpu_pipeline,
-                                    wgpu_map_geo: &st.wgpu_map_geometry,
-                                },
-                                &l2,
-                                RadarRenderInputs {
-                                    palette,
-                                    viewport: &st.viewport,
-                                    overlays: &st.overlays,
-                                    is_velocity: vel,
-                                    map: st.map_data.as_ref(),
-                                },
-                            ) {
-                                timestamps.push(l2.timestamp_str());
-                                surfaces.push(img);
-                                decoded.push((l2, vel));
-                            }
+                    let st = state.borrow();
+                    let code: u16 = if vel { 99 } else { 94 };
+                    let palette = st.palette_registry.for_product(code);
+                    for l2 in decoded_frames {
+                        if let Ok(img) = render_level2_helper(
+                            GpuRenderCtx {
+                                use_gpu: st.use_gpu,
+                                wgpu_ctx: &st.wgpu_ctx,
+                                wgpu_pipeline: &st.wgpu_pipeline,
+                                wgpu_map_geo: &st.wgpu_map_geometry,
+                            },
+                            &l2,
+                            RadarRenderInputs {
+                                palette,
+                                viewport: &st.viewport,
+                                overlays: &st.overlays,
+                                is_velocity: vel,
+                                map: st.map_data.as_ref(),
+                            },
+                        ) {
+                            timestamps.push(l2.timestamp_str());
+                            surfaces.push(img);
+                            decoded.push((l2, vel));
                         }
                     }
+                    drop(st);
                     if surfaces.is_empty() {
                         on_done(Err("no animation frames decoded".to_string()));
                         return;
@@ -2760,55 +3180,84 @@ fn load_animation_frames<F>(
                 let filenames = dl
                     .level3_filenames_for_animation(&site_id, &product, frame_count)
                     .await?;
-                let mut frames = Vec::new();
                 let total = filenames.len();
-                for (i, fname) in filenames.iter().enumerate() {
-                    if let Ok(mut g) = progress_c.lock() {
-                        *g = Some(format!("Fetching frame {}/{}", i + 1, total));
-                    }
-                    if let Some(url) = RadarDownloader::level3_file_url(&site_id, &product, fname) {
-                        frames.push(dl.fetch_bytes(&url).await?);
-                    }
+                let sem = Arc::new(tokio::sync::Semaphore::new(4));
+                let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let mut set = tokio::task::JoinSet::new();
+
+                for (idx, fname) in filenames.into_iter().enumerate() {
+                    let permit = Arc::clone(&sem)
+                        .acquire_owned()
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                    let dl = dl.clone();
+                    let site_id = site_id.clone();
+                    let product = product;
+                    let progress_c = Arc::clone(&progress_c);
+                    let completed = Arc::clone(&completed);
+
+                    set.spawn(async move {
+                        let _permit = permit;
+                        let url = RadarDownloader::level3_file_url(&site_id, &product, &fname)
+                            .ok_or_else(|| anyhow::anyhow!("Failed to build Level 3 URL for {fname}"))?;
+                        let raw = dl.fetch_bytes(&url).await?;
+                        let count = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if let Ok(mut g) = progress_c.lock() {
+                            *g = Some(format!("Fetching frame {}/{}", count, total));
+                        }
+                        let decoded = tokio::task::spawn_blocking(move || {
+                            level3::decode(&raw)
+                        })
+                        .await??;
+                        Ok::<_, anyhow::Error>((idx, decoded))
+                    });
                 }
+
+                let mut indexed = Vec::with_capacity(total);
+                while let Some(res) = set.join_next().await {
+                    let (idx, l3) = res.map_err(|e| anyhow::anyhow!("Join error: {e}"))??;
+                    indexed.push((idx, l3));
+                }
+                indexed.sort_by_key(|(idx, _)| *idx);
+                let frames: Vec<level3::Level3Data> = indexed.into_iter().map(|(_, l3)| l3).collect();
                 Ok::<_, anyhow::Error>(frames)
             },
             move |result| match result {
-                Ok(raw_frames) => {
+                Ok(decoded_frames) => {
                     stop_progress.set(true);
                     status.set_text(&format!(
                         "Constructing animation from {} frames...",
-                        raw_frames.len()
+                        decoded_frames.len()
                     ));
                     let mut surfaces = Vec::new();
                     let mut timestamps = Vec::new();
                     let mut decoded = Vec::new();
-                    for raw in raw_frames {
-                        let st = state.borrow();
-                        let is_vel = st.product.is_velocity();
-                        if let Ok(l3) = level3::decode(&raw) {
-                            let palette = st.palette_registry.for_product(l3.product_code);
-                            if let Ok(img) = render_level3_helper(
-                                GpuRenderCtx {
-                                    use_gpu: st.use_gpu,
-                                    wgpu_ctx: &st.wgpu_ctx,
-                                    wgpu_pipeline: &st.wgpu_pipeline,
-                                    wgpu_map_geo: &st.wgpu_map_geometry,
-                                },
-                                &l3,
-                                RadarRenderInputs {
-                                    palette,
-                                    viewport: &st.viewport,
-                                    overlays: &st.overlays,
-                                    is_velocity: is_vel,
-                                    map: st.map_data.as_ref(),
-                                },
-                            ) {
-                                timestamps.push(l3.timestamp_str());
-                                surfaces.push(img);
-                                decoded.push(l3);
-                            }
+                    let st = state.borrow();
+                    let is_vel = st.product.is_velocity();
+                    for l3 in decoded_frames {
+                        let palette = st.palette_registry.for_product(l3.product_code);
+                        if let Ok(img) = render_level3_helper(
+                            GpuRenderCtx {
+                                use_gpu: st.use_gpu,
+                                wgpu_ctx: &st.wgpu_ctx,
+                                wgpu_pipeline: &st.wgpu_pipeline,
+                                wgpu_map_geo: &st.wgpu_map_geometry,
+                            },
+                            &l3,
+                            RadarRenderInputs {
+                                palette,
+                                viewport: &st.viewport,
+                                overlays: &st.overlays,
+                                is_velocity: is_vel,
+                                map: st.map_data.as_ref(),
+                            },
+                        ) {
+                            timestamps.push(l3.timestamp_str());
+                            surfaces.push(img);
+                            decoded.push(l3);
                         }
                     }
+                    drop(st);
                     if surfaces.is_empty() {
                         on_done(Err("no animation frames decoded".to_string()));
                         return;
@@ -3786,20 +4235,20 @@ fn load_level2(
             } else {
                 RadarProduct::L2Reflectivity
             };
-            dl.fetch_level2_partial(&site_id, &prod, None).await
+            // Use fetch_level2_latest_decompressed so we hit the radar/l2-decomp
+            // cache that meso-updraft pre-warms — avoiding a redundant network
+            // fetch and BZ2 decompression when data is already cached.
+            dl.fetch_level2_latest_decompressed(&site_id, &prod).await
         },
         move |result| {
             for b in &btns {
                 b.set_sensitive(true);
             }
             match result {
-                Ok(compressed) => match level2::decompress_level2(&compressed) {
-                    Ok(raw) => {
-                        // Populate tilt list
-                        let tilts = level2::list_tilts(&raw, velocity).unwrap_or_default();
-                        let safe_tilt = tilt_idx.min(tilts.len().saturating_sub(1));
-                        match level2::decode(&raw, velocity, safe_tilt) {
-                            Ok(l2) => {
+                Ok(raw) => {
+                    match level2::decode_with_tilts(&raw, velocity, tilt_idx) {
+                            Ok((l2, tilts)) => {
+                                let safe_tilt = tilt_idx.min(tilts.len().saturating_sub(1));
                                 let img = {
                                     let st = state.borrow();
                                     let code: u16 = if velocity { 99 } else { 94 };
@@ -3860,11 +4309,9 @@ fn load_level2(
                                     Err(e) => status.set_text(&format!("Render error: {e}")),
                                 }
                             }
-                            Err(e) => status.set_text(&format!("L2 decode error: {e}")),
+                        Err(e) => status.set_text(&format!("L2 decode error: {e}")),
                         }
-                    }
-                    Err(e) => status.set_text(&format!("Decompress error: {e}")),
-                },
+                }
                 Err(e) => status.set_text(&format!("L2 download error: {e}")),
             }
         },
@@ -4195,12 +4642,15 @@ fn nearest_radial(azimuths: &[f32], az: f64) -> usize {
 fn lookup_l2_gate(st: &RadarPaneState, range_km: f64, az: f64) -> Option<(String, f64)> {
     use meso_data::radar::level2::NUM_RANGE_BINS;
 
-    // Try current cached L2 first; fall back to first animation frame
+    // Try current cached L2 first; fall back to active animation frame
     let (data, is_vel) = if let Some(ref l2) = st.cached_l2 {
         (&l2.0, l2.1)
     } else {
-        let first = st.anim_l2_frames.first()?;
-        (&first.0, first.1)
+        let frame = st
+            .anim_l2_frames
+            .get(st.anim_index)
+            .or_else(|| st.anim_l2_frames.first())?;
+        (&frame.0, frame.1)
     };
 
     let bin_size = data.bin_size_km as f64;
@@ -4230,11 +4680,13 @@ fn lookup_l2_gate(st: &RadarPaneState, range_km: f64, az: f64) -> Option<(String
 
 /// Attempt to look up a gate value from cached L3 data.
 fn lookup_l3_gate(st: &RadarPaneState, range_km: f64, az: f64) -> Option<(String, f64)> {
-    // Try current cached L3 first; fall back to first animation frame
+    // Try current cached L3 first; fall back to active animation frame
     let data = if let Some(ref l3) = st.cached_l3 {
         l3
     } else {
-        st.anim_l3_frames.first()?
+        st.anim_l3_frames
+            .get(st.anim_index)
+            .or_else(|| st.anim_l3_frames.first())?
     };
 
     let raw = if data.is_raster {
@@ -4282,30 +4734,9 @@ fn lookup_l3_gate(st: &RadarPaneState, range_km: f64, az: f64) -> Option<(String
     Some((label, dbz))
 }
 
-fn warning_bbox(w: &Warning) -> Option<(f64, f64, f64, f64)> {
-    let first = w.polygon.first()?;
-    let mut min_lat = first.lat;
-    let mut max_lat = first.lat;
-    let mut min_lon = first.lon;
-    let mut max_lon = first.lon;
-    for p in w.polygon.iter().skip(1) {
-        min_lat = min_lat.min(p.lat);
-        max_lat = max_lat.max(p.lat);
-        min_lon = min_lon.min(p.lon);
-        max_lon = max_lon.max(p.lon);
-    }
-    Some((min_lat, max_lat, min_lon, max_lon))
-}
-
+#[inline]
 fn warning_bbox_contains(w: &Warning, clicked_ll: &LatLon) -> bool {
-    warning_bbox(w)
-        .map(|(min_lat, max_lat, min_lon, max_lon)| {
-            clicked_ll.lat >= min_lat
-                && clicked_ll.lat <= max_lat
-                && clicked_ll.lon >= min_lon
-                && clicked_ll.lon <= max_lon
-        })
-        .unwrap_or(false)
+    w.bbox_contains(clicked_ll.lat, clicked_ll.lon)
 }
 
 fn warnings_layer_visible(st: &RadarPaneState) -> bool {

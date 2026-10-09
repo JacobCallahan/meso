@@ -846,14 +846,37 @@ fn fetch_sat_animation(
             let client = meso_data::http::wx_client();
             let urls = goes::animation_urls(&client, &sector, &band, frame_count).await?;
             let total = urls.len();
-            let mut frames: Vec<(String, Vec<u8>)> = Vec::new();
-            for (i, url) in urls.iter().enumerate() {
-                if let Ok(mut g) = progress_c.lock() {
-                    *g = Some(format!("Fetching frame {}/{total}", i + 1));
-                }
-                let bytes = goes::fetch_image(&client, url).await?;
-                frames.push((url.clone(), bytes));
+            let sem = Arc::new(tokio::sync::Semaphore::new(4));
+            let completed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut set = tokio::task::JoinSet::new();
+
+            for (idx, url) in urls.into_iter().enumerate() {
+                let permit = Arc::clone(&sem)
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                let client = client.clone();
+                let progress_c = Arc::clone(&progress_c);
+                let completed = Arc::clone(&completed);
+
+                set.spawn(async move {
+                    let _permit = permit;
+                    let bytes = goes::fetch_image(&client, &url).await?;
+                    let count = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if let Ok(mut g) = progress_c.lock() {
+                        *g = Some(format!("Fetching frame {}/{}", count, total));
+                    }
+                    Ok::<_, anyhow::Error>((idx, url, bytes))
+                });
             }
+
+            let mut indexed = Vec::with_capacity(total);
+            while let Some(res) = set.join_next().await {
+                let (idx, url, bytes) = res.map_err(|e| anyhow::anyhow!("Join error: {e}"))??;
+                indexed.push((idx, (url, bytes)));
+            }
+            indexed.sort_by_key(|(idx, _)| *idx);
+            let frames: Vec<(String, Vec<u8>)> = indexed.into_iter().map(|(_, item)| item).collect();
             Ok::<_, anyhow::Error>(frames)
         },
         move |result| {

@@ -85,6 +85,9 @@ pub fn decompress_level2(compressed: &[u8]) -> Result<Vec<u8>> {
     if compressed.len() < FILE_HEADER_SIZE as usize {
         bail!("Level 2 file too short for header");
     }
+    if !compressed.starts_with(b"AR2V") && !compressed.starts_with(b"ARCH") {
+        bail!("Invalid Level 2 header (expected AR2V or ARCH)");
+    }
     decompressed.extend_from_slice(&compressed[..FILE_HEADER_SIZE as usize]);
 
     let mut cursor = Cursor::new(compressed);
@@ -110,17 +113,23 @@ pub fn decompress_level2(compressed: &[u8]) -> Result<Vec<u8>> {
         cursor.seek(SeekFrom::Start(end as u64))?;
     }
 
+    if decompressed.len() <= FILE_HEADER_SIZE as usize {
+        bail!("No BZ2 blocks could be decompressed from Level 2 data");
+    }
+
     Ok(decompressed)
 }
 
-// ── Main decode ──────────────────────────────────────────────────────────────
-
-/// Decode a decompressed Level 2 binary into radial data.
+/// Decode a decompressed Level 2 binary into radial data and tilt information in a single pass.
 ///
 /// `velocity`  — if true, decode velocity moment; otherwise reflectivity.
 /// `tilt_idx`  — which elevation tilt to decode (0 = lowest).  If the index
 ///               exceeds the number of available tilts, the highest is used.
-pub fn decode(data: &[u8], velocity: bool, tilt_idx: usize) -> Result<Level2Data> {
+pub fn decode_with_tilts(
+    data: &[u8],
+    velocity: bool,
+    tilt_idx: usize,
+) -> Result<(Level2Data, Vec<TiltInfo>)> {
     let _moment_type = if velocity {
         VELOCITY_HIGH
     } else {
@@ -191,6 +200,14 @@ pub fn decode(data: &[u8], velocity: bool, tilt_idx: usize) -> Result<Level2Data
     // Sort by elevation_num ascending (lowest tilt first)
     tilts.sort_by_key(|(n, _)| *n);
 
+    let tilt_infos: Vec<TiltInfo> = tilts
+        .iter()
+        .map(|(n, recs)| TiltInfo {
+            elevation_num: *n as u8,
+            angle_deg: recs.first().map(|r| r.elevation_angle_deg).unwrap_or(0.0),
+        })
+        .collect();
+
     let tilt_idx = tilt_idx.min(tilts.len() - 1);
     let (_, records) = &tilts[tilt_idx];
     let elevation_angle_deg = records
@@ -227,15 +244,27 @@ pub fn decode(data: &[u8], velocity: bool, tilt_idx: usize) -> Result<Level2Data
     // Pad azimuths to n_radials if needed
     azimuths.resize(n_radials, 0.0);
 
-    Ok(Level2Data {
-        azimuths,
-        bins,
-        julian_date,
-        millis,
-        bin_size_km: 0.25,
-        num_radials: n_radials,
-        elevation_angle_deg,
-    })
+    Ok((
+        Level2Data {
+            azimuths,
+            bins,
+            julian_date,
+            millis,
+            bin_size_km: 0.25,
+            num_radials: n_radials,
+            elevation_angle_deg,
+        },
+        tilt_infos,
+    ))
+}
+
+/// Decode a decompressed Level 2 binary into radial data.
+///
+/// `velocity`  — if true, decode velocity moment; otherwise reflectivity.
+/// `tilt_idx`  — which elevation tilt to decode (0 = lowest).  If the index
+///               exceeds the number of available tilts, the highest is used.
+pub fn decode(data: &[u8], velocity: bool, tilt_idx: usize) -> Result<Level2Data> {
+    decode_with_tilts(data, velocity, tilt_idx).map(|(l2, _)| l2)
 }
 
 /// Return the list of available elevation tilts in a Level 2 scan.
