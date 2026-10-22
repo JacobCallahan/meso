@@ -63,8 +63,16 @@ impl RadarGrid {
     /// Sample the grid at continuous grid coordinates (col, row) using bilinear interpolation.
     #[inline]
     pub fn sample_bilinear(&self, col: f32, row: f32) -> f32 {
-        if col < 0.0 || row < 0.0 || col >= (self.width - 1) as f32 || row >= (self.height - 1) as f32 {
-            if col >= -0.5 && col <= self.width as f32 - 0.5 && row >= -0.5 && row <= self.height as f32 - 0.5 {
+        if col < 0.0
+            || row < 0.0
+            || col >= (self.width - 1) as f32
+            || row >= (self.height - 1) as f32
+        {
+            if col >= -0.5
+                && col <= self.width as f32 - 0.5
+                && row >= -0.5
+                && row <= self.height as f32 - 0.5
+            {
                 let c = col.clamp(0.0, (self.width - 1) as f32) as usize;
                 let r = row.clamp(0.0, (self.height - 1) as f32) as usize;
                 return self.data[r * self.width + c];
@@ -135,12 +143,12 @@ impl RadarGrid {
             .enumerate()
             .for_each(|(row, row_slice)| {
                 let y_km = (half_h - row as f32) * cell_km;
-                for col in 0..width {
+                for (col, cell) in row_slice.iter_mut().enumerate() {
                     let x_km = (col as f32 - half_w) * cell_km;
                     let range = (x_km * x_km + y_km * y_km).sqrt();
 
                     if range < 1.0 || range >= max_range {
-                        row_slice[col] = 0.0;
+                        *cell = 0.0;
                         continue;
                     }
 
@@ -151,7 +159,7 @@ impl RadarGrid {
                     }
 
                     let val = sample_polar_l2(l2, range, az);
-                    row_slice[col] = val;
+                    *cell = val;
                 }
             });
 
@@ -200,12 +208,12 @@ impl RadarGrid {
             .enumerate()
             .for_each(|(row, row_slice)| {
                 let y_km = (half_h - row as f32) * cell_km;
-                for col in 0..width {
+                for (col, cell) in row_slice.iter_mut().enumerate() {
                     let x_km = (col as f32 - half_w) * cell_km;
                     let range = (x_km * x_km + y_km * y_km).sqrt();
 
                     if range < 1.0 || range >= max_range {
-                        row_slice[col] = 0.0;
+                        *cell = 0.0;
                         continue;
                     }
 
@@ -215,7 +223,7 @@ impl RadarGrid {
                     }
 
                     let val = sample_polar_l3(l3, range, az);
-                    row_slice[col] = val;
+                    *cell = val;
                 }
             });
 
@@ -236,13 +244,13 @@ impl RadarGrid {
                 let sin_az = rad.sin();
                 let cos_az = rad.cos();
 
-                for b in 0..NUM_RANGE_BINS {
+                for (b, bin) in radial_bins.iter_mut().enumerate() {
                     let range_km = b as f32 * bin_size;
                     let x_km = range_km * sin_az;
                     let y_km = range_km * cos_az;
 
                     let val = self.sample_km(x_km, y_km);
-                    radial_bins[b] = val.round().clamp(0.0, 255.0) as u8;
+                    *bin = val.round().clamp(0.0, 255.0) as u8;
                 }
             });
 
@@ -307,13 +315,13 @@ impl RadarGrid {
                 let sin_az = rad.sin();
                 let cos_az = rad.cos();
 
-                for b in 0..num_bins {
+                for (b, bin) in radial_bins.iter_mut().enumerate() {
                     let range_km = b as f32 * bin_size;
                     let x_km = range_km * sin_az;
                     let y_km = range_km * cos_az;
 
                     let val = self.sample_km(x_km, y_km);
-                    radial_bins[b] = val.round().clamp(0.0, 255.0) as u8;
+                    *bin = val.round().clamp(0.0, 255.0) as u8;
                 }
             });
 
@@ -401,11 +409,7 @@ fn find_bounding_radials(azimuths: &[f32], target_az: f32) -> (usize, usize, f32
         let next_idx = (i + 1) % n;
         let a1 = azimuths[next_idx];
 
-        let span = if a1 >= a0 {
-            a1 - a0
-        } else {
-            a1 + 360.0 - a0
-        };
+        let span = if a1 >= a0 { a1 - a0 } else { a1 + 360.0 - a0 };
 
         let diff = if target_az >= a0 {
             target_az - a0

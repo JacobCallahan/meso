@@ -58,7 +58,6 @@ pub async fn fetch_radar(
                     .map_err(|e| anyhow::anyhow!("{e}"))?;
                 let dl = dl.clone();
                 let station = sub.station.clone();
-                let product = product;
                 set.spawn(async move {
                     let _permit = permit;
                     let res = dl.fetch_level2_decompressed(&station, &product, &url).await;

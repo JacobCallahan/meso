@@ -11,6 +11,9 @@ rayon.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+pollster.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -39,11 +39,13 @@ use meso_data::radar::level3::{self, Level3Data};
 use meso_data::radar::products::RadarProduct;
 use meso_data::storm_tracks::fetch_storm_tracks;
 use meso_data::updraft::{load_subscriptions, save_subscriptions};
+use meso_nowcast::{
+    run_nowcast_level2_with_progress, run_nowcast_level3_with_progress, NowcastResult,
+};
 use meso_render::cairo_render;
 use meso_render::overlay::{
     build_storm_tracks_layer, build_warnings_layer, warning_color, OverlayLayer, OverlaySet,
 };
-use meso_nowcast::{run_nowcast_level2, run_nowcast_level3, NowcastResult};
 use meso_render::viewport::Viewport;
 
 use crate::config::{Config, NamedLocation, RadarTrack, RadarTrackPoint};
@@ -622,7 +624,9 @@ pub fn build_radar_pane(
     toolbar.append(&frames_spin);
     toolbar.append(&anim_btn);
     let nowcast_btn = Button::with_label("🔮 Nowcast");
-    nowcast_btn.set_tooltip_text(Some("Generate 1–2 hour forecast from current radar animation"));
+    nowcast_btn.set_tooltip_text(Some(
+        "Generate 1–2 hour forecast from current radar animation",
+    ));
     toolbar.append(&nowcast_btn);
     toolbar.append(&pane_toggle_btn);
     toolbar.append(&overlay_btn);
@@ -968,7 +972,7 @@ pub fn build_radar_pane(
                 }
                 let is_nowcast = st
                     .nowcast_start_index
-                    .map_or(false, |start| st.anim_index >= start)
+                    .is_some_and(|start| st.anim_index >= start)
                     || ts.contains("Nowcast");
                 if is_nowcast {
                     cr.set_source_rgb(0.2, 1.0, 0.3);
@@ -1036,7 +1040,7 @@ pub fn build_radar_pane(
                 }
                 let is_nowcast = st
                     .nowcast_start_index
-                    .map_or(false, |start| st.anim_index >= start)
+                    .is_some_and(|start| st.anim_index >= start)
                     || ts.contains("Nowcast");
                 if is_nowcast {
                     cr.set_source_rgb(0.2, 1.0, 0.3);
@@ -1919,7 +1923,7 @@ pub fn build_radar_pane(
             } else {
                 (Rc::clone(&right_state_g), right_da_g.clone())
             };
-            if let Some(&first_code) = prod_codes_g.borrow().get(0) {
+            if let Some(&first_code) = prod_codes_g.borrow().first() {
                 if let Some(new_prod) = RadarProduct::from_code(first_code)
                     .filter(|p| p.is_map_supported() && p.supports_site(&site_id))
                 {
@@ -2510,6 +2514,7 @@ pub fn build_radar_pane(
         let status_nc = status.clone();
         let timeline_nc = timeline.clone();
         let su_nc = Rc::clone(&slider_updating);
+        let cfg_nc = Rc::clone(&shared_cfg);
         let anim_running_nc = Rc::clone(&anim_running);
         let anim_timer_nc = Rc::clone(&anim_timer);
         let anim_btn_nc = anim_btn.clone();
@@ -2517,7 +2522,8 @@ pub fn build_radar_pane(
 
         nowcast_btn.connect_clicked(move |btn| {
             let is_nowcasting = left_state_nc.borrow().nowcast_start_index.is_some()
-                || (pane_count_nc.get() == 2 && right_state_nc.borrow().nowcast_start_index.is_some());
+                || (pane_count_nc.get() == 2
+                    && right_state_nc.borrow().nowcast_start_index.is_some());
 
             if is_nowcasting {
                 let left_len = clear_nowcast_for_state(&left_state_nc);
@@ -2555,7 +2561,8 @@ pub fn build_radar_pane(
 
             let (left_l2, left_l3, left_is_vel) = {
                 let st = left_state_nc.borrow();
-                let l2: Vec<Level2Data> = st.anim_l2_frames.iter().map(|(f, _)| f.clone()).collect();
+                let l2: Vec<Level2Data> =
+                    st.anim_l2_frames.iter().map(|(f, _)| f.clone()).collect();
                 let l3 = st.anim_l3_frames.clone();
                 let is_vel = st.product.is_velocity();
                 (l2, l3, is_vel)
@@ -2564,7 +2571,8 @@ pub fn build_radar_pane(
             let is_dual = pane_count_nc.get() == 2;
             let (right_l2, right_l3, right_is_vel) = if is_dual {
                 let st = right_state_nc.borrow();
-                let l2: Vec<Level2Data> = st.anim_l2_frames.iter().map(|(f, _)| f.clone()).collect();
+                let l2: Vec<Level2Data> =
+                    st.anim_l2_frames.iter().map(|(f, _)| f.clone()).collect();
                 let l3 = st.anim_l3_frames.clone();
                 let is_vel = st.product.is_velocity();
                 (l2, l3, is_vel)
@@ -2572,9 +2580,13 @@ pub fn build_radar_pane(
                 (Vec::new(), Vec::new(), false)
             };
 
+            let diffusion = cfg_nc.borrow().nowcast_diffusion;
             btn.set_sensitive(false);
             btn.set_label("⏳ Nowcasting...");
-            status_nc.set_text("Estimating radar motion & nowcasting 1–2 hours...");
+            status_nc.set_text("Starting radar nowcast...");
+            let progress: runtime::ProgressSlot = Arc::new(Mutex::new(None));
+            let stop_progress = runtime::progress_poller(Arc::clone(&progress), status_nc.clone());
+            let progress_c = Arc::clone(&progress);
 
             let btn_done = btn.clone();
             let status_done = status_nc.clone();
@@ -2593,24 +2605,49 @@ pub fn build_radar_pane(
             runtime::spawn(
                 async move {
                     tokio::task::spawn_blocking(move || {
+                        let update_progress = |pane: &str, message: String| {
+                            if let Ok(mut slot) = progress_c.lock() {
+                                *slot = Some(format!("{pane}: {message}"));
+                            }
+                        };
                         let left_result = if !left_l2.is_empty() {
-                            run_nowcast_level2(&left_l2, None)
-                                .map(|res| NowcastBundle::L2(res, left_is_vel))
+                            run_nowcast_level2_with_progress(
+                                &left_l2,
+                                None,
+                                diffusion,
+                                &mut |message| update_progress("Main pane", message),
+                            )
+                            .map(|res| NowcastBundle::L2(res, left_is_vel))
                         } else {
-                            run_nowcast_level3(&left_l3, None)
-                                .map(NowcastBundle::L3)
+                            run_nowcast_level3_with_progress(
+                                &left_l3,
+                                None,
+                                diffusion,
+                                &mut |message| update_progress("Main pane", message),
+                            )
+                            .map(NowcastBundle::L3)
                         };
 
                         let right_result = if is_dual {
                             if !right_l2.is_empty() {
                                 Some(
-                                    run_nowcast_level2(&right_l2, None)
-                                        .map(|res| NowcastBundle::L2(res, right_is_vel)),
+                                    run_nowcast_level2_with_progress(
+                                        &right_l2,
+                                        None,
+                                        diffusion,
+                                        &mut |message| update_progress("Right pane", message),
+                                    )
+                                    .map(|res| NowcastBundle::L2(res, right_is_vel)),
                                 )
                             } else if !right_l3.is_empty() {
                                 Some(
-                                    run_nowcast_level3(&right_l3, None)
-                                        .map(NowcastBundle::L3),
+                                    run_nowcast_level3_with_progress(
+                                        &right_l3,
+                                        None,
+                                        diffusion,
+                                        &mut |message| update_progress("Right pane", message),
+                                    )
+                                    .map(NowcastBundle::L3),
                                 )
                             } else {
                                 None
@@ -2624,6 +2661,7 @@ pub fn build_radar_pane(
                     .await?
                 },
                 move |result| {
+                    stop_progress.set(true);
                     btn_done.set_sensitive(true);
                     match result {
                         Ok((left_res, right_res)) => {
@@ -2636,11 +2674,8 @@ pub fn build_radar_pane(
                                 }
                             };
 
-                            let (obs_len, nowcast_count, interval_secs) = append_nowcast_to_state(
-                                &left_st_done,
-                                &left_da_done,
-                                left_bundle,
-                            );
+                            let (obs_len, nowcast_count, interval_secs) =
+                                append_nowcast_to_state(&left_st_done, &left_da_done, left_bundle);
 
                             if let Some(Ok(right_bundle)) = right_res {
                                 append_nowcast_to_state(
@@ -2910,12 +2945,8 @@ fn append_nowcast_to_state(
         st.wgpu_anim = None;
 
         let placeholder = st.current_surface.clone().unwrap_or_else(|| {
-            cairo_render::render_map_only(
-                &st.viewport,
-                &st.overlays,
-                Some(st.map_data.as_ref()),
-            )
-            .expect("render_map_only failed creating placeholder")
+            cairo_render::render_map_only(&st.viewport, &st.overlays, Some(st.map_data.as_ref()))
+                .expect("render_map_only failed creating placeholder")
         });
 
         match bundle {
@@ -3074,7 +3105,6 @@ fn load_animation_frames<F>(
                         .map_err(|e| anyhow::anyhow!("{e}"))?;
                     let dl = dl.clone();
                     let site_id = site_id.clone();
-                    let l2_product = l2_product;
                     let url = format!("{base}{fname}");
                     let progress_c = Arc::clone(&progress_c);
                     let completed = Arc::clone(&completed);
@@ -3084,7 +3114,8 @@ fn load_animation_frames<F>(
                         let raw = dl
                             .fetch_level2_decompressed(&site_id, &l2_product, &url)
                             .await?;
-                        let count = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let count =
+                            completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         if let Ok(mut g) = progress_c.lock() {
                             *g = Some(format!("Fetching frame {}/{}", count, total));
                         }
@@ -3102,7 +3133,8 @@ fn load_animation_frames<F>(
                     indexed.push((idx, l2));
                 }
                 indexed.sort_by_key(|(idx, _)| *idx);
-                let frames: Vec<level2::Level2Data> = indexed.into_iter().map(|(_, l2)| l2).collect();
+                let frames: Vec<level2::Level2Data> =
+                    indexed.into_iter().map(|(_, l2)| l2).collect();
                 Ok::<_, anyhow::Error>((frames, velocity))
             },
             move |result| match result {
@@ -3199,16 +3231,17 @@ fn load_animation_frames<F>(
                     set.spawn(async move {
                         let _permit = permit;
                         let url = RadarDownloader::level3_file_url(&site_id, &product, &fname)
-                            .ok_or_else(|| anyhow::anyhow!("Failed to build Level 3 URL for {fname}"))?;
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Failed to build Level 3 URL for {fname}")
+                            })?;
                         let raw = dl.fetch_bytes(&url).await?;
-                        let count = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        let count =
+                            completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                         if let Ok(mut g) = progress_c.lock() {
                             *g = Some(format!("Fetching frame {}/{}", count, total));
                         }
-                        let decoded = tokio::task::spawn_blocking(move || {
-                            level3::decode(&raw)
-                        })
-                        .await??;
+                        let decoded =
+                            tokio::task::spawn_blocking(move || level3::decode(&raw)).await??;
                         Ok::<_, anyhow::Error>((idx, decoded))
                     });
                 }
@@ -3219,7 +3252,8 @@ fn load_animation_frames<F>(
                     indexed.push((idx, l3));
                 }
                 indexed.sort_by_key(|(idx, _)| *idx);
-                let frames: Vec<level3::Level3Data> = indexed.into_iter().map(|(_, l3)| l3).collect();
+                let frames: Vec<level3::Level3Data> =
+                    indexed.into_iter().map(|(_, l3)| l3).collect();
                 Ok::<_, anyhow::Error>(frames)
             },
             move |result| match result {
@@ -4247,70 +4281,70 @@ fn load_level2(
             match result {
                 Ok(raw) => {
                     match level2::decode_with_tilts(&raw, velocity, tilt_idx) {
-                            Ok((l2, tilts)) => {
-                                let safe_tilt = tilt_idx.min(tilts.len().saturating_sub(1));
-                                let img = {
-                                    let st = state.borrow();
-                                    let code: u16 = if velocity { 99 } else { 94 };
-                                    let palette = st.palette_registry.for_product(code);
-                                    render_level2_helper(
-                                        GpuRenderCtx {
-                                            use_gpu: st.use_gpu,
-                                            wgpu_ctx: &st.wgpu_ctx,
-                                            wgpu_pipeline: &st.wgpu_pipeline,
-                                            wgpu_map_geo: &st.wgpu_map_geometry,
-                                        },
-                                        &l2,
-                                        RadarRenderInputs {
-                                            palette,
-                                            viewport: &st.viewport,
-                                            overlays: &st.overlays,
-                                            is_velocity: velocity,
-                                            map: st.map_data.as_ref(),
-                                        },
-                                    )
-                                };
-                                {
-                                    let mut st = state.borrow_mut();
-                                    st.cached_l2 = Some((l2.clone(), velocity));
-                                    st.wgpu_geo = None;
-                                    st.cached_l2_bytes = Some(raw);
-                                    st.l2_tilt_idx = safe_tilt;
-                                    st.l2_tilts = tilts.clone();
-                                }
-                                // Update tilt selector (outside state borrow)
-                                {
-                                    let labels: Vec<String> = tilts
-                                        .iter()
-                                        .map(|t| format!("{:.1}°", t.angle_deg))
-                                        .collect();
-                                    let label_refs: Vec<&str> =
-                                        labels.iter().map(String::as_str).collect();
-                                    if let Some(strings) = tilt_combo
-                                        .model()
-                                        .and_then(|m| m.downcast::<gtk4::StringList>().ok())
-                                    {
-                                        strings.splice(0, strings.n_items(), &label_refs);
-                                    }
-                                    tilt_combo.set_selected(safe_tilt as u32);
-                                }
-                                tilt_combo.set_visible(true);
-                                match img {
-                                    Ok(img) => {
-                                        {
-                                            let mut st = state.borrow_mut();
-                                            st.timestamp_str = Some(l2.timestamp_str());
-                                            st.current_surface = Some(img);
-                                            st.wgpu_geo = None;
-                                        }
-                                        status.set_text("Ready");
-                                        queue_pane_redraw(&state, &drawing_area);
-                                    }
-                                    Err(e) => status.set_text(&format!("Render error: {e}")),
-                                }
+                        Ok((l2, tilts)) => {
+                            let safe_tilt = tilt_idx.min(tilts.len().saturating_sub(1));
+                            let img = {
+                                let st = state.borrow();
+                                let code: u16 = if velocity { 99 } else { 94 };
+                                let palette = st.palette_registry.for_product(code);
+                                render_level2_helper(
+                                    GpuRenderCtx {
+                                        use_gpu: st.use_gpu,
+                                        wgpu_ctx: &st.wgpu_ctx,
+                                        wgpu_pipeline: &st.wgpu_pipeline,
+                                        wgpu_map_geo: &st.wgpu_map_geometry,
+                                    },
+                                    &l2,
+                                    RadarRenderInputs {
+                                        palette,
+                                        viewport: &st.viewport,
+                                        overlays: &st.overlays,
+                                        is_velocity: velocity,
+                                        map: st.map_data.as_ref(),
+                                    },
+                                )
+                            };
+                            {
+                                let mut st = state.borrow_mut();
+                                st.cached_l2 = Some((l2.clone(), velocity));
+                                st.wgpu_geo = None;
+                                st.cached_l2_bytes = Some(raw);
+                                st.l2_tilt_idx = safe_tilt;
+                                st.l2_tilts = tilts.clone();
                             }
-                        Err(e) => status.set_text(&format!("L2 decode error: {e}")),
+                            // Update tilt selector (outside state borrow)
+                            {
+                                let labels: Vec<String> = tilts
+                                    .iter()
+                                    .map(|t| format!("{:.1}°", t.angle_deg))
+                                    .collect();
+                                let label_refs: Vec<&str> =
+                                    labels.iter().map(String::as_str).collect();
+                                if let Some(strings) = tilt_combo
+                                    .model()
+                                    .and_then(|m| m.downcast::<gtk4::StringList>().ok())
+                                {
+                                    strings.splice(0, strings.n_items(), &label_refs);
+                                }
+                                tilt_combo.set_selected(safe_tilt as u32);
+                            }
+                            tilt_combo.set_visible(true);
+                            match img {
+                                Ok(img) => {
+                                    {
+                                        let mut st = state.borrow_mut();
+                                        st.timestamp_str = Some(l2.timestamp_str());
+                                        st.current_surface = Some(img);
+                                        st.wgpu_geo = None;
+                                    }
+                                    status.set_text("Ready");
+                                    queue_pane_redraw(&state, &drawing_area);
+                                }
+                                Err(e) => status.set_text(&format!("Render error: {e}")),
+                            }
                         }
+                        Err(e) => status.set_text(&format!("L2 decode error: {e}")),
+                    }
                 }
                 Err(e) => status.set_text(&format!("L2 download error: {e}")),
             }
