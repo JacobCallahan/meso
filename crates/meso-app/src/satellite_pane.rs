@@ -876,7 +876,8 @@ fn fetch_sat_animation(
                 indexed.push((idx, (url, bytes)));
             }
             indexed.sort_by_key(|(idx, _)| *idx);
-            let frames: Vec<(String, Vec<u8>)> = indexed.into_iter().map(|(_, item)| item).collect();
+            let frames: Vec<(String, Vec<u8>)> =
+                indexed.into_iter().map(|(_, item)| item).collect();
             Ok::<_, anyhow::Error>(frames)
         },
         move |result| {

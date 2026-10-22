@@ -107,7 +107,10 @@ async fn fetch_level2_partial_and_decompress_ktlx() {
     let tilts = level2::list_tilts(&decompressed, false).expect("list tilts");
     assert!(!tilts.is_empty(), "tilts should not be empty");
     let l2 = level2::decode(&decompressed, false, 0).expect("decode reflectivity tilt 0");
-    assert!(!l2.azimuths.is_empty(), "decoded radials should not be empty");
+    assert!(
+        !l2.azimuths.is_empty(),
+        "decoded radials should not be empty"
+    );
 }
 
 /// Fetch a partial Level 2 archive for KTLX (velocity) and verify the raw
@@ -131,7 +134,10 @@ async fn fetch_level2_velocity_partial_and_decompress_ktlx() {
     let tilts = level2::list_tilts(&decompressed, true).expect("list velocity tilts");
     assert!(!tilts.is_empty(), "velocity tilts should not be empty");
     let l2 = level2::decode(&decompressed, true, 0).expect("decode velocity tilt 0");
-    assert!(!l2.azimuths.is_empty(), "decoded velocity radials should not be empty");
+    assert!(
+        !l2.azimuths.is_empty(),
+        "decoded velocity radials should not be empty"
+    );
 }
 
 /// Verify that `level2_filenames_for_animation` returns a non-empty list of

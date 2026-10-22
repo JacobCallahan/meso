@@ -1719,11 +1719,14 @@ name = "meso-nowcast"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "chrono",
  "meso-data",
+ "pollster",
  "rayon",
  "tokio",
  "tracing",
+ "wgpu",
 ]
 
 [[package]]

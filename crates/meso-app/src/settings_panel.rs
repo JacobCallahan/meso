@@ -93,6 +93,25 @@ pub fn show_settings_panel(parent: &impl IsA<Window>, shared_config: Rc<RefCell<
     }
     radar_grid.attach(&radar_frames, 1, 2, 1, 1);
 
+    // Nowcast diffusion
+    radar_grid.attach(&row_label("Nowcast smoothing (km²/min)"), 0, 3, 1, 1);
+    let nowcast_k = gtk4::Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
+    nowcast_k.set_digits(2);
+    nowcast_k.set_draw_value(true);
+    nowcast_k.set_hexpand(true);
+    nowcast_k.set_size_request(200, -1);
+    nowcast_k.set_tooltip_text(Some(
+        "Nowcast smoothing (diffusion coefficient K). 0 keeps echoes as sharp as the scheme allows; higher values blur and spread them faster at longer lead times. Default 0.05.",
+    ));
+    nowcast_k.set_value(shared_config.borrow().nowcast_diffusion as f64);
+    {
+        let cfg = Rc::clone(&shared_config);
+        nowcast_k.connect_value_changed(move |scale| {
+            cfg.borrow_mut().nowcast_diffusion = scale.value() as f32;
+        });
+    }
+    radar_grid.attach(&nowcast_k, 1, 3, 1, 1);
+
     outer.append(&radar_grid);
     outer.append(&Separator::new(Orientation::Horizontal));
 

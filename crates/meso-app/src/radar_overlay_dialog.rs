@@ -111,6 +111,34 @@ pub fn show_overlay_dialog(
 
     content.append(&Separator::new(Orientation::Horizontal));
 
+    let nowcast_hdr = Label::new(Some("Nowcast"));
+    nowcast_hdr.add_css_class("title-5");
+    nowcast_hdr.set_halign(gtk4::Align::Start);
+    content.append(&nowcast_hdr);
+
+    let k_row = GBox::new(Orientation::Horizontal, 8);
+    let k_lbl = Label::new(Some("Smoothing (km²/min)"));
+    k_lbl.set_halign(gtk4::Align::Start);
+    let k_spin = gtk4::Scale::with_range(Orientation::Horizontal, 0.0, 0.5, 0.01);
+    k_spin.set_digits(2);
+    k_spin.set_draw_value(true);
+    k_spin.set_hexpand(true);
+    k_spin.set_tooltip_text(Some(
+        "Nowcast smoothing (diffusion coefficient K). Lower = sharper echoes. Applies to the next nowcast run.",
+    ));
+    k_spin.set_value(shared_cfg.borrow().nowcast_diffusion as f64);
+    {
+        let cfg = Rc::clone(&shared_cfg);
+        k_spin.connect_value_changed(move |scale| {
+            cfg.borrow_mut().nowcast_diffusion = scale.value() as f32;
+        });
+    }
+    k_row.append(&k_lbl);
+    k_row.append(&k_spin);
+    content.append(&k_row);
+
+    content.append(&Separator::new(Orientation::Horizontal));
+
     let close_btn = Button::with_label("Close");
     close_btn.set_halign(gtk4::Align::End);
     close_btn.set_margin_top(4);

@@ -53,6 +53,9 @@ fn default_radar_vector_lead_minutes() -> u16 {
 fn default_radar_vector_interval_minutes() -> u16 {
     15
 }
+fn default_nowcast_diffusion() -> f32 {
+    0.05
+}
 fn default_alerts_pane_position() -> i32 {
     -1
 }
@@ -241,6 +244,9 @@ pub struct Config {
     /// Interval (minutes) between projected vector dots/segments
     #[serde(default = "default_radar_vector_interval_minutes")]
     pub radar_vector_interval_minutes: u16,
+    /// Nowcast diffusion coefficient K (km^2 per minute)
+    #[serde(default = "default_nowcast_diffusion")]
+    pub nowcast_diffusion: f32,
     // ── Updraft daemon ────────────────────────────────────────────────────────
     /// Enable the meso-updraft background caching daemon
     #[serde(default = "default_false")]
@@ -309,6 +315,7 @@ impl Default for Config {
             radar_vector_accel_bias: true,
             radar_vector_lead_minutes: default_radar_vector_lead_minutes(),
             radar_vector_interval_minutes: default_radar_vector_interval_minutes(),
+            nowcast_diffusion: default_nowcast_diffusion(),
             updraft_enabled: false,
             updraft_interval_secs: default_updraft_interval_secs(),
         }
